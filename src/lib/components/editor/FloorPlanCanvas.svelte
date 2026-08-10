@@ -2933,6 +2933,15 @@
     }
   }
 
+  // Distinguishing a trackpad two-finger pan from a mouse wheel is impossible
+  // from a single vertical event (both give deltaX===0, ctrlKey===false). So we
+  // remember when we last saw an unambiguous trackpad signal — a horizontal
+  // component or a fractional/sub-pixel delta — and treat scrolls as panning for
+  // a short window afterwards. This stops pure-vertical trackpad pans from being
+  // misread as zoom, while leaving genuine mouse-wheel zoom intact.
+  let trackpadDetectedAt = -Infinity;
+  const TRACKPAD_WINDOW_MS = 1500;
+
   function onWheel(e: WheelEvent) {
     markDirty();
     e.preventDefault();
@@ -2947,6 +2956,15 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
 
+    // Detect trackpad: horizontal movement or fractional (pixel-mode) deltas.
+    const now = performance.now();
+    const hasHorizontal = Math.abs(e.deltaX) > 0;
+    const fractional =
+      e.deltaMode === 0 && (!Number.isInteger(e.deltaY) || !Number.isInteger(e.deltaX));
+    if (hasHorizontal || fractional) trackpadDetectedAt = now;
+    const isTrackpadPan =
+      hasHorizontal || now - trackpadDetectedAt < TRACKPAD_WINDOW_MS;
+
     if (e.ctrlKey) {
       // Pinch-to-zoom on trackpad (or Ctrl+scroll)
       const factor = e.deltaY > 0 ? 0.95 : 1.05;
@@ -2957,8 +2975,8 @@
       camX = worldX - (sx - width / 2) / newZoom;
       camY = worldY - (sy - height / 2) / newZoom;
       zoom = newZoom;
-    } else if (Math.abs(e.deltaX) > 0) {
-      // Two-finger trackpad pan (deltaX present means trackpad gesture)
+    } else if (isTrackpadPan) {
+      // Two-finger trackpad pan (may be purely vertical within a gesture)
       camX += e.deltaX / zoom;
       camY += e.deltaY / zoom;
     } else {
