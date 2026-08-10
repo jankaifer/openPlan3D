@@ -17,6 +17,9 @@
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
+  import { terrainGridForBounds, nearestGridPoint, gridPointsInRadius } from '$lib/utils/terrain';
+  import { setTerrain, beginUndoGroup, endUndoGroup } from '$lib/stores/project';
+  import type { Terrain } from '$lib/models/types';
 
   let container: HTMLDivElement;
   let renderer: THREE.WebGLRenderer;
@@ -30,9 +33,36 @@
   let pointerControls: PointerLockControls;
   let animId: number;
   let currentFloor: Floor | null = null;
+  // Floor id the camera was last auto-centred on — prevents edits from resetting the view.
+  let lastCenteredFloorId: string | null = null;
   let savedRooms: Room[] = [];
   let wallGroup: THREE.Group;
-  
+  // Terrain (sculpted ground) — material/texture created once, mesh rebuilt on demand
+  let terrainMat: THREE.MeshStandardMaterial;
+  let terrainMesh: THREE.Mesh | null = null;
+  // The terrain currently rendered — source of truth for sculpt hit-testing.
+  let activeTerrain: Terrain | null = null;
+  // OpenTTD-style land-editing tools
+  let terrainMode = $state(false);
+  let terrainTool = $state<'raise' | 'lower' | 'level' | 'smooth' | 'setHeight' | 'measure'>('raise');
+  let terrainRadius = $state(50);  // brush radius in cm (< half a cell = single point)
+  let terrainStep = $state(25);    // height change per grid point per stroke, in cm
+  let terrainTargetHeight = $state(0); // absolute height for the 'setHeight' tool, in cm
+  // Height readout from the 'measure' tool (cm), null until first measured.
+  let measuredHeight = $state<number | null>(null);
+  let measuredAt = $state<{ x: number; y: number } | null>(null);
+  // Live cursor overlay: glowing dots at affected points + brush ring.
+  let terrainCursorGroup: THREE.Group | null = null;
+  let terrainDotTex: THREE.Texture | null = null;
+  // Floating label that follows the mouse while measuring.
+  let hoverClient = $state<{ x: number; y: number } | null>(null);
+  let hoverMeasure = $state<number | null>(null);
+  // Live-stroke state (not reactive — mutated during pointer drag)
+  let sculpting = false;
+  let strokeTerrain: Terrain | null = null;     // working copy edited during a stroke
+  let strokeTouched: Set<number> | null = null;  // grid indices already stepped this stroke
+  let levelTarget = 0;                           // reference height for the 'level' tool (cm)
+
   // Raycasting for wall selection in 3D
   const raycaster = new THREE.Raycaster();
   const mouse = new THREE.Vector2();
@@ -638,9 +668,8 @@
     skyTexture.mapping = THREE.EquirectangularReflectionMapping;
     scene.background = skyTexture;
 
-    // Ground plane — textured concrete with grid overlay
+    // Ground plane — textured concrete with grid overlay, displaced into terrain
     const groundSize = 40000;
-    const groundGeo = new THREE.PlaneGeometry(groundSize, groundSize);
     // Generate a subtle concrete texture with grid
     const groundCanvas = document.createElement('canvas');
     groundCanvas.width = 1024; groundCanvas.height = 1024;
@@ -677,20 +706,25 @@
     }
     const groundTex = new THREE.CanvasTexture(groundCanvas);
     groundTex.wrapS = groundTex.wrapT = THREE.RepeatWrapping;
-    groundTex.repeat.set(groundSize / 4000, groundSize / 4000);
-    const groundMat = new THREE.MeshStandardMaterial({
+    // One texture tile per 4000cm of terrain (UVs are set in cm in buildTerrain).
+    groundTex.repeat.set(1 / 4000, 1 / 4000);
+    terrainMat = new THREE.MeshStandardMaterial({
       map: groundTex,
       roughness: 0.92,
-      metalness: 0
+      metalness: 0,
+      // Flat-shade each tile so terrain reads as connected grid facets
+      // (OpenTTD-style) rather than a smoothly interpolated surface.
+      flatShading: true
     });
-    groundMat.polygonOffset = true;
-    groundMat.polygonOffsetFactor = 2;
-    groundMat.polygonOffsetUnits = 2;
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.position.y = -1;
-    ground.receiveShadow = true;
-    scene.add(ground);
+    terrainMat.polygonOffset = true;
+    terrainMat.polygonOffsetFactor = 2;
+    terrainMat.polygonOffsetUnits = 2;
+    buildTerrain();
+
+    // Overlay group + soft glowing-dot sprite for the terrain edit cursor.
+    terrainDotTex = makeDotTexture();
+    terrainCursorGroup = new THREE.Group();
+    scene.add(terrainCursorGroup);
 
     camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 1, 20000);
     camera.position.set(800, 600, 800);
@@ -706,7 +740,12 @@
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.08;
+    controls.dampingFactor = 0.12;
+    // Snappier navigation — faster rotate/pan/zoom than the defaults (all 1.0).
+    controls.rotateSpeed = 1.6;
+    controls.panSpeed = 1.8;
+    controls.zoomSpeed = 1.5;
+    controls.keyPanSpeed = 14;
     controls.target.set(0, 100, 0);
     controls.maxPolarAngle = Math.PI / 2.05;
     // Mark dirty when orbit controls move the camera
@@ -716,8 +755,30 @@
     let pointerDownPos = { x: 0, y: 0 };
     renderer.domElement.addEventListener('pointerdown', (e) => {
       pointerDownPos = { x: e.clientX, y: e.clientY };
+      // Terrain sculpting: left button starts/extends a stroke.
+      if (terrainMode && e.button === 0) beginTerrainStroke(e);
+    });
+    renderer.domElement.addEventListener('pointermove', (e) => {
+      if (!terrainMode) return;
+      const hit = raycastTerrain(e);
+      if (sculpting) {
+        if (hit) {
+          applyTerrainBrush(hit);
+          buildTerrain(strokeTerrain!);
+          showTerrainCursor(hit, e.clientX, e.clientY);
+        }
+        return;
+      }
+      // Hover (no button): live preview / measurement.
+      if (hit) showTerrainCursor(hit, e.clientX, e.clientY);
+      else hideTerrainCursor();
+    });
+    renderer.domElement.addEventListener('pointerleave', () => {
+      if (sculpting) endTerrainStroke();
+      hideTerrainCursor();
     });
     renderer.domElement.addEventListener('pointerup', (e) => {
+      if (terrainMode) { endTerrainStroke(); return; }
       // Only select in edit mode, and only if mouse didn't move much (not a drag/orbit)
       if (!editMode) return;
       const dx = e.clientX - pointerDownPos.x;
@@ -891,15 +952,9 @@
     rimLight.position.set(-200, 600, 1000);
     scene.add(rimLight);
 
-    // Textured floor
-    const floorTex = createFloorTexture();
-    const floorGeo = new THREE.PlaneGeometry(4000, 4000);
-    const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, side: THREE.DoubleSide, roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 });
-    const floorMesh = new THREE.Mesh(floorGeo, floorMat);
-    floorMesh.rotation.x = -Math.PI / 2;
-    floorMesh.position.y = 0.5;
-    floorMesh.receiveShadow = true;
-    scene.add(floorMesh);
+    // No fixed floor plane here — the sculptable terrain heightfield is the
+    // ground (see buildTerrain), so its actual elevation shows and can dip
+    // below the y=0 datum. Rooms still get their own floor slabs in buildWalls.
 
     wallGroup = new THREE.Group();
     scene.add(wallGroup);
@@ -1668,7 +1723,13 @@
     // Columns
     buildColumns(floor);
 
-    autoCenterCamera(floor);
+    // Only recentre the camera when we first show a floor or switch floors —
+    // not on every rebuild, otherwise edits (e.g. committing a terrain stroke,
+    // which rebuilds the scene) would snap the camera back each time.
+    if (lastCenteredFloorId !== floor.id) {
+      autoCenterCamera(floor);
+      lastCenteredFloorId = floor.id;
+    }
   }
 
   /** Build all floors stacked vertically in 3D */
@@ -1843,6 +1904,287 @@
       buildAllFloorsStacked();
     } else if (currentFloor) {
       buildWalls(currentFloor);
+    }
+    buildTerrain();
+    markSceneDirty();
+  }
+
+  /**
+   * Build (or rebuild) the terrain ground mesh. Sizes the grid to the current
+   * building footprint plus a margin, displaces vertices by the project's
+   * sculpted heights (or a seeded test surface until the sculpting UI lands),
+   * and swaps it into the scene. World mapping matches the walls: plan (x, y)
+   * → world (x, height, z=y). Zero grade sits exactly at the y=0 datum, so
+   * lowered terrain dips visibly below the building base.
+   */
+  function buildTerrain(explicit?: Terrain) {
+    if (!scene || !terrainMat) return;
+
+    let terrain: Terrain;
+    if (explicit) {
+      terrain = explicit;
+    } else {
+      const project = get(currentProject);
+      // Grid precision matches the app's snap grid (25 cm default), so terrain
+      // points line up with walls and other grid-aligned geometry.
+      const snapCell = get(projectSettings).gridSize;
+      // Fixed square plot centred on the origin (bounds=null → centred fallback),
+      // or the project's sculpted terrain when present. Flat until sculpted.
+      terrain = project?.terrain
+        ?? terrainGridForBounds(null, { cellSize: snapCell });
+    }
+    activeTerrain = terrain;
+
+    const { origin, cellSize, cols, rows, heights } = terrain;
+    const positions = new Float32Array(cols * rows * 3);
+    const uvs = new Float32Array(cols * rows * 2);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const i = r * cols + c;
+        const x = origin.x + c * cellSize;
+        const z = origin.y + r * cellSize; // plan Y → world Z
+        positions[i * 3] = x;
+        positions[i * 3 + 1] = heights[i] ?? 0; // 0-grade at the y=0 datum
+        positions[i * 3 + 2] = z;
+        uvs[i * 2] = x;
+        uvs[i * 2 + 1] = z;
+      }
+    }
+    // Two triangles per cell.
+    const indices: number[] = [];
+    for (let r = 0; r < rows - 1; r++) {
+      for (let c = 0; c < cols - 1; c++) {
+        const a = r * cols + c;
+        const b = a + 1;
+        const d = a + cols;
+        const e = d + 1;
+        indices.push(a, d, b, b, d, e);
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+
+    if (terrainMesh) {
+      scene.remove(terrainMesh);
+      terrainMesh.geometry.dispose();
+    }
+    terrainMesh = new THREE.Mesh(geo, terrainMat);
+    terrainMesh.receiveShadow = true;
+    scene.add(terrainMesh);
+  }
+
+  // ── OpenTTD-style terrain sculpting ──────────────────────────────────────
+
+  /** Raycast the pointer against the terrain mesh; returns the world hit or null. */
+  function raycastTerrain(e: PointerEvent): THREE.Vector3 | null {
+    if (!terrainMesh) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObject(terrainMesh, false);
+    return hits.length ? hits[0].point : null;
+  }
+
+  /** Soft radial white sprite used for the glowing affected-point dots. */
+  function makeDotTexture(): THREE.Texture {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const g = c.getContext('2d')!;
+    const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.35, 'rgba(255,255,255,0.7)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 64, 64);
+    return new THREE.CanvasTexture(c);
+  }
+
+  /** Remove and dispose the current cursor overlay meshes (keeps the group). */
+  function clearCursorMeshes() {
+    if (!terrainCursorGroup) return;
+    for (const ch of [...terrainCursorGroup.children]) {
+      terrainCursorGroup.remove(ch);
+      (ch as any).geometry?.dispose?.();
+      (ch as any).material?.dispose?.();
+    }
+  }
+
+  /**
+   * Draw the live edit cursor at a world hit: glowing white dots on every grid
+   * point that would be affected (snapped to points, never mid-triangle), plus
+   * a brush-radius ring. In measure mode it marks the single snapped point and
+   * updates the floating readout at the mouse.
+   */
+  function showTerrainCursor(hit: THREE.Vector3, clientX: number, clientY: number) {
+    const t = activeTerrain;
+    if (!t || !terrainCursorGroup || !terrainDotTex) return;
+    clearCursorMeshes();
+    const EPS = 2; // lift dots just above the surface so they read cleanly
+    const measure = terrainTool === 'measure';
+
+    const { col, row } = nearestGridPoint(t, hit.x, hit.z);
+    const snapI = row * t.cols + col;
+    const idxs = measure ? [snapI] : gridPointsInRadius(t, hit.x, hit.z, terrainRadius);
+
+    const pos = new Float32Array(idxs.length * 3);
+    idxs.forEach((i, k) => {
+      const c = i % t.cols, r = Math.floor(i / t.cols);
+      pos[k * 3] = t.origin.x + c * t.cellSize;
+      pos[k * 3 + 1] = (t.heights[i] ?? 0) + EPS;
+      pos[k * 3 + 2] = t.origin.y + r * t.cellSize;
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const dotMat = new THREE.PointsMaterial({
+      map: terrainDotTex, size: measure ? 26 : 15, sizeAttenuation: true,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, color: 0xffffff
+    });
+    terrainCursorGroup.add(new THREE.Points(geo, dotMat));
+
+    // Brush-radius ring (only when the brush covers more than a single point).
+    if (!measure && terrainRadius >= t.cellSize / 2) {
+      const seg = 48;
+      const rp = new Float32Array((seg + 1) * 3);
+      for (let s = 0; s <= seg; s++) {
+        const a = (s / seg) * Math.PI * 2;
+        rp[s * 3] = hit.x + Math.cos(a) * terrainRadius;
+        rp[s * 3 + 1] = hit.y + EPS;
+        rp[s * 3 + 2] = hit.z + Math.sin(a) * terrainRadius;
+      }
+      const ringGeo = new THREE.BufferGeometry();
+      ringGeo.setAttribute('position', new THREE.BufferAttribute(rp, 3));
+      const ringMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6, depthWrite: false });
+      terrainCursorGroup.add(new THREE.Line(ringGeo, ringMat));
+    }
+
+    if (measure) {
+      const h = t.heights[snapI] ?? 0;
+      hoverMeasure = h;
+      hoverClient = { x: clientX, y: clientY };
+      measuredHeight = h;
+      measuredAt = { x: t.origin.x + col * t.cellSize, y: t.origin.y + row * t.cellSize };
+    } else {
+      hoverClient = null;
+      hoverMeasure = null;
+    }
+    markSceneDirty();
+  }
+
+  /** Hide the cursor overlay and floating label (leaving terrain mode / off-mesh). */
+  function hideTerrainCursor() {
+    clearCursorMeshes();
+    hoverClient = null;
+    hoverMeasure = null;
+    markSceneDirty();
+  }
+
+  /**
+   * Ensure a working terrain to sculpt. Uses the project's saved terrain when
+   * present, otherwise a flat fixed-square plot (real editing starts from level
+   * ground). Returns a deep copy safe to mutate.
+   */
+  function makeStrokeTerrain(): Terrain {
+    const project = get(currentProject);
+    const base = project?.terrain
+      ?? terrainGridForBounds(null, { cellSize: get(projectSettings).gridSize });
+    return { ...base, origin: { ...base.origin }, heights: base.heights.slice() };
+  }
+
+  /** Apply the active brush at a world hit point to the in-progress stroke terrain. */
+  function applyTerrainBrush(hit: THREE.Vector3) {
+    const t = strokeTerrain;
+    if (!t || !strokeTouched) return;
+    // World Z maps back to plan Y (see buildTerrain's coordinate mapping).
+    const planX = hit.x;
+    const planY = hit.z;
+    const idxs = gridPointsInRadius(t, planX, planY, terrainRadius);
+
+    if (terrainTool === 'smooth') {
+      // Average each point with its 4-neighbours (one pass), once per stroke.
+      const src = t.heights;
+      for (const i of idxs) {
+        if (strokeTouched.has(i)) continue;
+        strokeTouched.add(i);
+        const col = i % t.cols;
+        const row = Math.floor(i / t.cols);
+        let sum = src[i], n = 1;
+        if (col > 0) { sum += src[i - 1]; n++; }
+        if (col < t.cols - 1) { sum += src[i + 1]; n++; }
+        if (row > 0) { sum += src[i - t.cols]; n++; }
+        if (row < t.rows - 1) { sum += src[i + t.cols]; n++; }
+        t.heights[i] = sum / n;
+      }
+      return;
+    }
+
+    for (const i of idxs) {
+      if (strokeTouched.has(i)) continue; // one step per point per stroke
+      strokeTouched.add(i);
+      if (terrainTool === 'raise') t.heights[i] += terrainStep;
+      else if (terrainTool === 'lower') t.heights[i] -= terrainStep;
+      else if (terrainTool === 'level') t.heights[i] = levelTarget;
+      else if (terrainTool === 'setHeight') t.heights[i] = terrainTargetHeight;
+    }
+  }
+
+  /** Read the terrain height at a world hit and show it in the panel. */
+  function measureTerrainAt(hit: THREE.Vector3) {
+    const t = activeTerrain;
+    if (!t) return;
+    const { col, row } = nearestGridPoint(t, hit.x, hit.z);
+    measuredHeight = t.heights[row * t.cols + col] ?? 0;
+    measuredAt = { x: t.origin.x + col * t.cellSize, y: t.origin.y + row * t.cellSize };
+  }
+
+  function beginTerrainStroke(e: PointerEvent) {
+    const hit = raycastTerrain(e);
+    if (!hit) return;
+    // Measure is read-only: sample and show, no stroke or undo entry.
+    if (terrainTool === 'measure') { measureTerrainAt(hit); return; }
+    sculpting = true;
+    strokeTerrain = makeStrokeTerrain();
+    strokeTouched = new Set();
+    // 'level' flattens toward the height sampled at the first click.
+    const { col, row } = nearestGridPoint(strokeTerrain, hit.x, hit.z);
+    levelTarget = strokeTerrain.heights[row * strokeTerrain.cols + col] ?? 0;
+    applyTerrainBrush(hit);
+    buildTerrain(strokeTerrain);
+    showTerrainCursor(hit, e.clientX, e.clientY);
+    markSceneDirty();
+  }
+
+  function endTerrainStroke() {
+    if (!sculpting) return;
+    sculpting = false;
+    if (strokeTerrain && strokeTouched && strokeTouched.size > 0) {
+      // Commit the whole stroke as a single undo entry.
+      beginUndoGroup();
+      setTerrain(strokeTerrain);
+      endUndoGroup('Sculpt terrain');
+    }
+    strokeTerrain = null;
+    strokeTouched = null;
+  }
+
+  /** Enter/leave terrain-editing mode. Disables orbit-rotate so left-drag sculpts. */
+  function toggleTerrainMode() {
+    terrainMode = !terrainMode;
+    if (controls) controls.enableRotate = !terrainMode;
+    if (!terrainMode) hideTerrainCursor();
+    if (terrainMode) {
+      editMode = false;
+      selectedElementId.set(null);
+      if (walkthroughMode) exitWalkthroughMode();
+      // Replace the placeholder seed surface with real (flat) editable terrain
+      // so what you sculpt is what gets saved.
+      const p = get(currentProject);
+      if (p && !p.terrain) setTerrain(makeStrokeTerrain());
+      buildTerrain();
     }
     markSceneDirty();
   }
@@ -2235,6 +2577,18 @@
       </svg>
     </button>
 
+    <!-- Terrain (Landscaping) Toggle -->
+    <button
+      onclick={toggleTerrainMode}
+      class="p-2 rounded-lg transition-colors {terrainMode ? 'bg-green-600 text-white ring-2 ring-green-300' : 'bg-black/70 text-white hover:bg-black/80'}"
+      title={terrainMode ? 'Exit Terrain Editing' : 'Edit Terrain — raise, lower, level & smooth the land'}
+      aria-label={terrainMode ? 'Exit Terrain Editing' : 'Edit Terrain'}
+    >
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round">
+        <path d="M3 20l5-9 4 5 3-4 6 8z"/>
+      </svg>
+    </button>
+
     <!-- Interior Camera Button -->
     <button
       onclick={() => {
@@ -2296,6 +2650,81 @@
     {/if}
     </button>
   </div><!-- end 3D toolbar row -->
+
+  <!-- Terrain Editing Panel -->
+  {#if terrainMode}
+    <div class="absolute top-16 left-4 z-50 bg-gray-900/95 text-white rounded-xl shadow-2xl backdrop-blur-sm p-3 w-56 text-sm">
+      <div class="flex items-center gap-2 mb-2 font-medium">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 20l5-9 4 5 3-4 6 8z"/></svg>
+        Terrain
+      </div>
+      <div class="grid grid-cols-2 gap-1.5 mb-3">
+        {#each [['raise', 'Raise'], ['lower', 'Lower'], ['level', 'Level'], ['smooth', 'Smooth'], ['setHeight', 'Set height'], ['measure', 'Measure']] as [tool, label]}
+          <button
+            onclick={() => { terrainTool = tool as typeof terrainTool; }}
+            class="px-2 py-1.5 rounded-md transition-colors {terrainTool === tool ? 'bg-green-600 text-white' : 'bg-white/10 hover:bg-white/20'}"
+          >{label}</button>
+        {/each}
+      </div>
+      {#if terrainTool !== 'measure'}
+        <label class="block mb-2">
+          <span class="flex justify-between text-xs text-gray-300"><span>Brush radius</span><span>{terrainRadius} cm</span></span>
+          <input type="range" min="0" max="500" step="25" bind:value={terrainRadius} class="w-full accent-green-500" />
+        </label>
+      {/if}
+      {#if terrainTool === 'raise' || terrainTool === 'lower'}
+        <label class="block mb-2">
+          <span class="flex justify-between text-xs text-gray-300"><span>Step</span><span>{terrainStep} cm</span></span>
+          <input type="range" min="5" max="100" step="5" bind:value={terrainStep} class="w-full accent-green-500" />
+        </label>
+      {/if}
+      {#if terrainTool === 'setHeight'}
+        <label class="block mb-2">
+          <span class="text-xs text-gray-300">Target height</span>
+          <div class="flex items-center gap-1">
+            <input type="number" step="5" bind:value={terrainTargetHeight} class="w-full bg-white/10 rounded px-2 py-1 text-white" />
+            <span class="text-xs text-gray-400">cm</span>
+          </div>
+        </label>
+      {/if}
+      {#if terrainTool === 'measure'}
+        <div class="mb-2 rounded-md bg-white/5 px-2 py-2 text-xs">
+          {#if measuredHeight !== null}
+            <div class="text-gray-300">Height: <span class="text-white font-semibold">{measuredHeight.toFixed(1)} cm</span></div>
+            {#if measuredAt}
+              <div class="text-gray-400 mt-0.5">at ({(measuredAt.x / 100).toFixed(2)} m, {(measuredAt.y / 100).toFixed(2)} m)</div>
+            {/if}
+          {:else}
+            <div class="text-gray-400">Click the ground to read its height.</div>
+          {/if}
+        </div>
+      {/if}
+      <p class="text-[11px] leading-snug text-gray-400">
+        {#if terrainTool === 'measure'}
+          Click any point to measure its elevation relative to the 0 datum.
+        {:else if terrainTool === 'setHeight'}
+          Drag on the ground to set points to exactly {terrainTargetHeight} cm.
+        {:else if terrainTool === 'level'}
+          Drag to flatten toward the height you first click.
+        {:else if terrainTool === 'smooth'}
+          Drag to average neighbouring points and soften the surface.
+        {:else}
+          Drag to {terrainTool === 'raise' ? 'raise' : 'lower'} points by one step per pass.
+        {/if}
+        Rotate is disabled here — pan (right-drag) and zoom still work.
+      </p>
+    </div>
+  {/if}
+
+  <!-- Live measurement label following the mouse -->
+  {#if terrainMode && terrainTool === 'measure' && hoverClient && hoverMeasure !== null}
+    <div
+      class="pointer-events-none fixed z-[60] px-1.5 py-0.5 rounded bg-black/85 text-white text-xs font-mono shadow-lg"
+      style="left: {hoverClient.x + 16}px; top: {hoverClient.y + 16}px;"
+    >
+      {hoverMeasure.toFixed(0)} cm
+    </div>
+  {/if}
 
   {#if cameraPlacementMode && !cameraPlaced}
     <div class="absolute top-16 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white px-4 py-2 rounded-lg text-sm backdrop-blur-sm">

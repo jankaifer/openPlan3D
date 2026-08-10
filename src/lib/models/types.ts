@@ -178,6 +178,26 @@ export interface Floor {
   entourage?: EntourageItem[];
 }
 
+/**
+ * Sculpted terrain heightfield for the plot around the building.
+ * A regular grid of elevation samples in plan space. `heights` are in cm
+ * relative to base grade (0 = flat ground at the building's y=0 level),
+ * stored row-major (row r, col c → index r * cols + c). Absent terrain means
+ * a flat plot.
+ */
+export interface Terrain {
+  /** Plan-space position of grid sample (col 0, row 0), in cm. */
+  origin: Point;
+  /** Spacing between adjacent samples, in cm. */
+  cellSize: number;
+  /** Number of samples along X (columns). */
+  cols: number;
+  /** Number of samples along Y (rows). */
+  rows: number;
+  /** rows*cols elevations in cm; 0 = base grade. */
+  heights: number[];
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -187,4 +207,6 @@ export interface Project {
   createdAt: Date;
   updatedAt: Date;
   customEntourage?: CustomEntourageDef[];
+  /** Optional sculpted terrain around the building (site-wide, all stories). */
+  terrain?: Terrain;
 }

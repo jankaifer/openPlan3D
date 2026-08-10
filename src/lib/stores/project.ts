@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem } from '$lib/models/types';
+import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem, Terrain } from '$lib/models/types';
 
 
 function uid(): string {
@@ -196,6 +196,19 @@ function mutate(fn: (floor: Floor) => void, description?: string, coalesceKey?: 
   const floor = p.floors.find((f) => f.id === p.activeFloorId);
   if (!floor) return;
   fn(floor);
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
+/**
+ * Set (or clear) the project-wide terrain. Does not push its own undo snapshot —
+ * terrain sculpting wraps a whole stroke in beginUndoGroup()/endUndoGroup() so it
+ * collapses into a single undo entry. Pass `undefined` to remove terrain.
+ */
+export function setTerrain(terrain: Terrain | undefined) {
+  const p = get(currentProject);
+  if (!p) return;
+  p.terrain = terrain;
   p.updatedAt = new Date();
   currentProject.set({ ...p });
 }
