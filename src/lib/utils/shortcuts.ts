@@ -1,6 +1,6 @@
 import { selectedTool, undo, redo, viewMode, selectedElementId, selectedElementIds, removeElement, panMode, beginUndoGroup, endUndoGroup } from '$lib/stores/project';
 import { get } from 'svelte/store';
-import { localStore } from '$lib/services/datastore';
+import { store as localStore } from '$lib/services/datastore';
 import { currentProject } from '$lib/stores/project';
 
 export interface ShortcutContext {

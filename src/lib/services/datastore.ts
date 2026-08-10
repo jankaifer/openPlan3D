@@ -20,6 +20,21 @@ function getAll(): Record<string, string> {
   }
 }
 
+/** Revive dates and backfill any missing floor array fields on a loaded project. */
+export function normalizeProject(p: any): Project {
+  p.createdAt = new Date(p.createdAt);
+  p.updatedAt = new Date(p.updatedAt);
+  for (const floor of (p.floors ?? [])) {
+    if (!floor.rooms) floor.rooms = [];
+    if (!floor.doors) floor.doors = [];
+    if (!floor.windows) floor.windows = [];
+    if (!floor.furniture) floor.furniture = [];
+    if (!floor.stairs) floor.stairs = [];
+    if (!floor.columns) floor.columns = [];
+  }
+  return p as Project;
+}
+
 export const localStore: DataStore = {
   async save(project) {
     const all = getAll();
@@ -48,19 +63,7 @@ export const localStore: DataStore = {
     const all = getAll();
     const raw = all[id];
     if (!raw) return null;
-    const p = JSON.parse(raw);
-    p.createdAt = new Date(p.createdAt);
-    p.updatedAt = new Date(p.updatedAt);
-    // Migrate floors: ensure all array fields exist
-    for (const floor of (p.floors ?? [])) {
-      if (!floor.rooms) floor.rooms = [];
-      if (!floor.doors) floor.doors = [];
-      if (!floor.windows) floor.windows = [];
-      if (!floor.furniture) floor.furniture = [];
-      if (!floor.stairs) floor.stairs = [];
-      if (!floor.columns) floor.columns = [];
-    }
-    return p as Project;
+    return normalizeProject(JSON.parse(raw));
   },
 
   async list() {
@@ -106,4 +109,114 @@ export const localStore: DataStore = {
   getThumbnail(id: string): string | null {
     try { return localStorage.getItem(`floorplan_thumb_${id}`); } catch { return null; }
   },
+};
+
+/**
+ * Server-backed store talking to the /api/projects routes (Postgres).
+ * Thumbnails stay in localStorage (they are large images, not project data).
+ */
+export const remoteStore: DataStore = {
+  async save(project) {
+    const res = await fetch('/api/projects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(project),
+    });
+    if (!res.ok) throw new Error(`save failed: ${res.status}`);
+  },
+
+  async load(id) {
+    const res = await fetch(`/api/projects/${id}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`load failed: ${res.status}`);
+    return normalizeProject(await res.json());
+  },
+
+  async list() {
+    const res = await fetch('/api/projects');
+    if (!res.ok) throw new Error(`list failed: ${res.status}`);
+    return res.json();
+  },
+
+  async delete(id) {
+    const res = await fetch(`/api/projects/${id}`, { method: 'DELETE' });
+    if (!res.ok && res.status !== 404) throw new Error(`delete failed: ${res.status}`);
+    try { localStorage.removeItem(`floorplan_thumb_${id}`); } catch {}
+  },
+
+  async duplicate(id) {
+    const original = await this.load(id);
+    if (!original) return null;
+    const newId = Math.random().toString(36).slice(2, 10);
+    const dup: Project = { ...original, id: newId, name: `${original.name} (Copy)`, createdAt: new Date(), updatedAt: new Date() };
+    await this.save(dup);
+    try {
+      const thumb = localStorage.getItem(`floorplan_thumb_${id}`);
+      if (thumb) localStorage.setItem(`floorplan_thumb_${newId}`, thumb);
+    } catch {}
+    return dup;
+  },
+
+  saveThumbnail: localStore.saveThumbnail,
+  getThumbnail: localStore.getThumbnail,
+};
+
+// Capability probe: is the server DB reachable? Cached after first check so we
+// route every call consistently and only migrate once.
+let backendPromise: Promise<DataStore> | null = null;
+
+async function migrateLocalToRemote() {
+  const FLAG = 'floorplan_migrated_to_db';
+  try {
+    if (localStorage.getItem(FLAG)) return;
+    const localProjects = await localStore.list();
+    if (localProjects.length === 0) { localStorage.setItem(FLAG, '1'); return; }
+    const remoteProjects = await remoteStore.list();
+    const remoteIds = new Set(remoteProjects.map((p) => p.id));
+    for (const summary of localProjects) {
+      if (remoteIds.has(summary.id)) continue;
+      const full = await localStore.load(summary.id);
+      if (full) await remoteStore.save(full);
+    }
+    localStorage.setItem(FLAG, '1');
+    console.info('[DataStore] Migrated local projects into the server database');
+  } catch (e) {
+    console.warn('[DataStore] Local→DB migration skipped:', e);
+  }
+}
+
+async function resolveBackend(): Promise<DataStore> {
+  // SSR / no fetch → localStorage only.
+  if (typeof window === 'undefined') return localStore;
+  try {
+    const res = await fetch('/api/projects', { method: 'GET' });
+    if (res.ok) {
+      await migrateLocalToRemote();
+      return remoteStore;
+    }
+  } catch {
+    // network error → fall through to local
+  }
+  return localStore;
+}
+
+function backend(): Promise<DataStore> {
+  if (!backendPromise) backendPromise = resolveBackend();
+  return backendPromise;
+}
+
+/**
+ * The active project store. Uses the server Postgres database when the
+ * /api/projects routes are available, otherwise transparently falls back to
+ * localStorage — so the app keeps working before the DB is provisioned.
+ */
+export const store: DataStore = {
+  async save(project) { return (await backend()).save(project); },
+  async load(id) { return (await backend()).load(id); },
+  async list() { return (await backend()).list(); },
+  async delete(id) { return (await backend()).delete(id); },
+  async duplicate(id) { return (await backend()).duplicate(id); },
+  // Thumbnails are always local (both backends delegate here anyway).
+  saveThumbnail: localStore.saveThumbnail,
+  getThumbnail: localStore.getThumbnail,
 };

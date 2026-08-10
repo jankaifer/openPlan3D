@@ -1,6 +1,6 @@
 import { writable, get } from 'svelte/store';
 import { currentProject } from './project';
-import { localStore } from '$lib/services/datastore';
+import { store as localStore } from '$lib/services/datastore';
 import { saveSnapshot } from '$lib/stores/versionHistory';
 
 export type SaveState = 'saved' | 'unsaved' | 'saving';
