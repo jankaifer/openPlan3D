@@ -18,7 +18,7 @@
   import { getMaterial } from '$lib/utils/materials';
   import { getWallTextureCanvas, getFloorTextureCanvas, setTextureLoadCallback } from '$lib/utils/textureGenerator';
   import { terrainGridForBounds, nearestGridPoint, gridPointsInRadius } from '$lib/utils/terrain';
-  import { setTerrain, beginUndoGroup, endUndoGroup } from '$lib/stores/project';
+  import { setTerrain, beginUndoGroup, endUndoGroup, updateFloorTransform } from '$lib/stores/project';
   import type { Terrain } from '$lib/models/types';
 
   let container: HTMLDivElement;
@@ -79,7 +79,30 @@
   let wallsTransparent = $state(false);
   // Multi-floor stacking
   let showAllFloors = $state(false);
+  // Re-center the camera on the next stacked rebuild (set when the view is toggled on).
+  let recenterAllFloors = true;
   const FLOOR_HEIGHT = 300; // cm — wall height + slab thickness
+
+  // Layer alignment panel (only in the "all floors" view)
+  let alignPanelOpen = $state(false);
+  let alignFloorId = $state<string | null>(null);
+  // Live view of the project's floors for the alignment panel dropdown/sliders.
+  // Derived from the store so the sliders/labels reflect the current values.
+  let floorsList = $derived(
+    ($currentProject?.floors ?? []).map((f, i) => ({
+      id: f.id,
+      name: f.name || (i === 0 ? 'Ground Floor' : `Floor ${i}`),
+      offsetX: f.offsetX ?? 0,
+      offsetZ: f.offsetZ ?? 0,
+      elevationOffset: f.elevationOffset ?? 0,
+      yaw: f.yaw ?? 0,
+    }))
+  );
+  let alignFloor = $derived(floorsList.find((f) => f.id === alignFloorId) ?? null);
+  function setAlign(field: 'offsetX' | 'offsetZ' | 'elevationOffset' | 'yaw', value: number) {
+    if (!alignFloorId || Number.isNaN(value)) return;
+    updateFloorTransform(alignFloorId, { [field]: value });
+  }
 
   // Walkthrough mode
   let walkthroughMode = $state(false);
@@ -841,7 +864,7 @@
         return;
       }
 
-      const intersects = raycaster.intersectObjects(wallGroup.children, false);
+      const intersects = raycaster.intersectObjects(wallGroup.children, true);
       let hitWallId: string | null = null;
       for (const hit of intersects) {
         if (hit.object.userData.wallId) {
@@ -898,7 +921,7 @@
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
-      const intersects = raycaster.intersectObjects(wallGroup.children, false);
+      const intersects = raycaster.intersectObjects(wallGroup.children, true);
       const hit = intersects.find(i => i.object.userData.wallId);
       if (hit && hit.object !== hoveredMesh) {
         hoveredMesh = hit.object as THREE.Mesh;
@@ -1733,49 +1756,72 @@
   }
 
   /** Build all floors stacked vertically in 3D */
+  /** Plan-space centroid (bbox center) of a floor's walls, used as the pivot
+   *  for the per-floor yaw rotation. Falls back to origin if the floor is empty. */
+  function floorCentroid(floor: Floor): { x: number; z: number } {
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const w of floor.walls) {
+      for (const p of [w.start, w.end]) {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minZ = Math.min(minZ, p.y); maxZ = Math.max(maxZ, p.y);
+      }
+    }
+    if (!isFinite(minX)) return { x: 0, z: 0 };
+    return { x: (minX + maxX) / 2, z: (minZ + maxZ) / 2 };
+  }
+
+  /** Apply a floor's stacking height + alignment transform to its group.
+   *  Yaw pivots about the floor's plan centroid (not the world origin) by
+   *  composing position = C − R·C + translate. */
+  function applyFloorTransform(group: THREE.Group, floor: Floor, index: number) {
+    const baseY = index * FLOOR_HEIGHT + (floor.elevationOffset ?? 0);
+    const ox = floor.offsetX ?? 0;
+    const oz = floor.offsetZ ?? 0;
+    const yaw = ((floor.yaw ?? 0) * Math.PI) / 180;
+    const c = floorCentroid(floor);
+    const rotated = new THREE.Vector3(c.x, 0, c.z).applyEuler(new THREE.Euler(0, yaw, 0));
+    group.rotation.y = yaw;
+    group.position.set(c.x - rotated.x + ox, baseY, c.z - rotated.z + oz);
+  }
+
   function buildAllFloorsStacked() {
     const project = get(currentProject);
     if (!project || project.floors.length === 0) return;
-    
-    // Use buildWalls for the active floor first (it clears wallGroup)
+
     const activeF = project.floors.find(f => f.id === project.activeFloorId) ?? project.floors[0];
+    const activeIdx = Math.max(0, project.floors.findIndex(f => f.id === activeF.id));
+
+    // Build the active floor (full detail) into wallGroup, then lift its meshes
+    // into their own transform group so it can be aligned like the others.
     buildWalls(activeF);
-    
-    // Now add other floors at Y offsets
+    const activeGroup = new THREE.Group();
+    activeGroup.userData.floorId = activeF.id;
+    for (const child of [...wallGroup.children]) {
+      wallGroup.remove(child);
+      activeGroup.add(child);
+    }
+    applyFloorTransform(activeGroup, activeF, activeIdx);
+    wallGroup.add(activeGroup);
+    addFloorLabel(activeIdx, activeF.name || (activeIdx === 0 ? 'Ground Floor' : `Floor ${activeIdx}`), activeIdx * FLOOR_HEIGHT + (activeF.elevationOffset ?? 0));
+
+    // Other floors: simplified + transparent, each in its own transform group.
     for (let i = 0; i < project.floors.length; i++) {
       const floor = project.floors[i];
-      if (floor.id === activeF.id) {
-        // Active floor is already built at Y=0, move it to its correct offset
-        // We need to offset all current wallGroup children
-        const yOffset = i * FLOOR_HEIGHT;
-        if (yOffset !== 0) {
-          // Move existing children up
-          for (const child of [...wallGroup.children]) {
-            child.position.y += yOffset;
-          }
-        }
-        // Add floor label
-        addFloorLabel(i, floor.name || (i === 0 ? 'Ground Floor' : `Floor ${i}`), i * FLOOR_HEIGHT);
-        continue;
-      }
-      
-      // Build non-active floor into a temporary group, then merge with transparency
-      const tempGroup = new THREE.Group();
-      buildFloorIntoGroup(floor, tempGroup, i * FLOOR_HEIGHT, 0.35);
-      
-      // Add floor label
-      addFloorLabel(i, floor.name || (i === 0 ? 'Ground Floor' : `Floor ${i}`), i * FLOOR_HEIGHT);
-      
-      // Move children from temp group to wallGroup
-      while (tempGroup.children.length > 0) {
-        const child = tempGroup.children[0];
-        tempGroup.remove(child);
-        wallGroup.add(child);
-      }
+      if (floor.id === activeF.id) continue;
+      const g = new THREE.Group();
+      g.userData.floorId = floor.id;
+      buildFloorIntoGroup(floor, g, 0, 0.35);
+      applyFloorTransform(g, floor, i);
+      wallGroup.add(g);
+      addFloorLabel(i, floor.name || (i === 0 ? 'Ground Floor' : `Floor ${i}`), i * FLOOR_HEIGHT + (floor.elevationOffset ?? 0));
     }
-    
-    // Re-center camera to encompass all floors
-    autoCenterCameraAllFloors(project.floors.length);
+
+    // Re-center camera only when the stacked view is first shown — NOT on every
+    // rebuild, otherwise editing a layer's transform keeps yanking the camera back.
+    if (recenterAllFloors) {
+      autoCenterCameraAllFloors(project.floors.length);
+      recenterAllFloors = false;
+    }
   }
   
   function addFloorLabel(floorIndex: number, name: string, yOffset: number) {
@@ -2522,7 +2568,7 @@
   <div class="absolute top-4 right-4 z-50 flex gap-1.5">
     <!-- Multi-Floor Stacking Toggle -->
     <button
-      onclick={() => { showAllFloors = !showAllFloors; rebuildScene(); }}
+      onclick={() => { showAllFloors = !showAllFloors; if (showAllFloors) recenterAllFloors = true; rebuildScene(); }}
       class="p-2 rounded-lg transition-colors {showAllFloors ? 'bg-purple-600 text-white ring-2 ring-purple-300' : 'bg-black/70 text-white hover:bg-black/80'}"
       title={showAllFloors ? 'Active Floor Only' : 'Show All Floors Stacked'}
       aria-label={showAllFloors ? 'Active Floor Only' : 'Show All Floors Stacked'}
@@ -2533,6 +2579,21 @@
         <rect x="4" y="2" width="16" height="4" rx="1" opacity="0.3"/>
       </svg>
     </button>
+
+    <!-- Align Layers (only meaningful when floors are stacked) -->
+    {#if showAllFloors}
+      <button
+        onclick={() => { alignPanelOpen = !alignPanelOpen; if (alignPanelOpen && !alignFloorId && floorsList.length) alignFloorId = floorsList[0].id; }}
+        class="p-2 rounded-lg transition-colors {alignPanelOpen ? 'bg-purple-600 text-white ring-2 ring-purple-300' : 'bg-black/70 text-white hover:bg-black/80'}"
+        title="Align Layers"
+        aria-label="Align Layers"
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2v20M2 12h20"/>
+          <path d="M7 7l10 10M17 7L7 17" opacity="0.4"/>
+        </svg>
+      </button>
+    {/if}
 
     <!-- Top-Down View Button -->
     <button
@@ -2713,6 +2774,54 @@
         {/if}
         Rotate is disabled here — pan (right-drag) and zoom still work.
       </p>
+    </div>
+  {/if}
+
+  <!-- Layer Alignment Panel (all-floors view) -->
+  {#if showAllFloors && alignPanelOpen}
+    <div class="absolute top-16 right-4 z-50 bg-gray-900/95 text-white rounded-xl shadow-2xl backdrop-blur-sm p-3 w-64 text-sm">
+      <div class="flex items-center justify-between mb-2">
+        <div class="flex items-center gap-2 font-medium">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M2 12h20"/></svg>
+          Align layer
+        </div>
+        <button class="text-gray-400 hover:text-white" onclick={() => alignPanelOpen = false} aria-label="Close">✕</button>
+      </div>
+
+      <label class="block mb-3">
+        <span class="text-xs text-gray-300">Layer</span>
+        <select bind:value={alignFloorId} class="w-full bg-white/10 rounded px-2 py-1 text-white mt-0.5">
+          {#each floorsList as f}
+            <option value={f.id}>{f.name}</option>
+          {/each}
+        </select>
+      </label>
+
+      {#if alignFloor}
+        <label class="block mb-2">
+          <span class="flex justify-between text-xs text-gray-300"><span>Move X</span><span>{(alignFloor.offsetX / 100).toFixed(2)} m</span></span>
+          <input type="range" min="-1000" max="1000" step="5" value={alignFloor.offsetX} oninput={(e) => setAlign('offsetX', +e.currentTarget.value)} class="w-full accent-purple-500" />
+        </label>
+        <label class="block mb-2">
+          <span class="flex justify-between text-xs text-gray-300"><span>Move Y</span><span>{(alignFloor.offsetZ / 100).toFixed(2)} m</span></span>
+          <input type="range" min="-1000" max="1000" step="5" value={alignFloor.offsetZ} oninput={(e) => setAlign('offsetZ', +e.currentTarget.value)} class="w-full accent-purple-500" />
+        </label>
+        <label class="block mb-2">
+          <span class="flex justify-between text-xs text-gray-300"><span>Height</span><span>{alignFloor.elevationOffset} cm</span></span>
+          <input type="range" min="-300" max="300" step="5" value={alignFloor.elevationOffset} oninput={(e) => setAlign('elevationOffset', +e.currentTarget.value)} class="w-full accent-purple-500" />
+        </label>
+        <label class="block mb-2">
+          <span class="flex justify-between text-xs text-gray-300"><span>Rotate</span><span>{alignFloor.yaw}°</span></span>
+          <input type="range" min="-180" max="180" step="1" value={alignFloor.yaw} oninput={(e) => setAlign('yaw', +e.currentTarget.value)} class="w-full accent-purple-500" />
+        </label>
+        <button
+          class="w-full mt-1 px-2 py-1.5 rounded-md bg-white/10 hover:bg-white/20 transition-colors text-xs"
+          onclick={() => { if (alignFloorId) updateFloorTransform(alignFloorId, { offsetX: 0, offsetZ: 0, elevationOffset: 0, yaw: 0 }); }}
+        >Reset this layer</button>
+        <p class="text-[11px] leading-snug text-gray-400 mt-2">Nudge a story to align it with the others. The terrain stays fixed.</p>
+      {:else}
+        <p class="text-[11px] text-gray-400">No layer selected.</p>
+      {/if}
     </div>
   {/if}
 

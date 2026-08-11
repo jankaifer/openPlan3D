@@ -610,6 +610,25 @@ export function renameFloor(id: string, name: string) {
   currentProject.set({ ...p });
 }
 
+/**
+ * Update a floor's 3D alignment transform (offsetX/offsetZ/elevationOffset/yaw).
+ * Rapid edits to the same floor+fields coalesce into a single undo entry, so
+ * dragging a slider doesn't flood the history. Pass the fields to change.
+ */
+export function updateFloorTransform(
+  id: string,
+  updates: Partial<Pick<Floor, 'offsetX' | 'offsetZ' | 'elevationOffset' | 'yaw'>>,
+) {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find((f) => f.id === id);
+  if (!floor) return;
+  snapshot('Aligned layer', coalesceKeyFor('floor', id, updates));
+  Object.assign(floor, updates);
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
 export function setActiveFloor(floorId: string) {
   const p = get(currentProject);
   if (!p) return;

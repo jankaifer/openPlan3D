@@ -176,6 +176,20 @@ export interface Floor {
   textAnnotations: TextAnnotation[];
   groups: ElementGroup[];
   entourage?: EntourageItem[];
+  /**
+   * Optional per-floor alignment transform, applied when floors are shown
+   * stacked in the 3D "all layers" view. Lets a misaligned (e.g. imported)
+   * story be nudged into place relative to the others. The terrain is global
+   * and is NOT affected by this. All default to 0 / unset = identity.
+   */
+  /** Horizontal offset along plan X, in cm. */
+  offsetX?: number;
+  /** Horizontal offset along plan Y/Z, in cm. */
+  offsetZ?: number;
+  /** Extra vertical offset added on top of the floor's stacking height, in cm. */
+  elevationOffset?: number;
+  /** Horizontal (yaw) rotation about the floor's plan centroid, in degrees. */
+  yaw?: number;
 }
 
 /**
