@@ -599,6 +599,17 @@ export function removeFloor(id: string) {
   currentProject.set({ ...p });
 }
 
+export function renameFloor(id: string, name: string) {
+  const p = get(currentProject);
+  if (!p) return;
+  const floor = p.floors.find(f => f.id === id);
+  if (!floor) return;
+  snapshot('Renamed floor');
+  floor.name = name;
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
 export function setActiveFloor(floorId: string) {
   const p = get(currentProject);
   if (!p) return;

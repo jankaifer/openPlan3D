@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
-  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject, activeFloor, selectedElementId, elevationWallId, elevationPickMode } from '$lib/stores/project';
+  import { currentProject, viewMode, undo, redo, addFloor, removeFloor, renameFloor, setActiveFloor, updateProjectName, loadProject, createDefaultProject, snapEnabled, canvasZoom, panMode, showFurnitureStore, layerVisibility, importFloorIntoCurrentProject, activeFloor, selectedElementId, elevationWallId, elevationPickMode } from '$lib/stores/project';
   import { store as localStore } from '$lib/services/datastore';
   import { get } from 'svelte/store';
   import type { Floor, Project } from '$lib/models/types';
@@ -30,6 +30,9 @@
   // Mobile (< md) overflow menu for secondary actions
   let moreOpen = $state(false);
   let moreRef: HTMLDivElement | undefined = $state();
+  // Per-floor "⋯" options menu (rename / delete); holds the open floor's id
+  let floorMenuOpen = $state('');
+  let floorBarRef: HTMLDivElement | undefined = $state();
 
   currentProject.subscribe((p) => {
     if (p) {
@@ -91,8 +94,16 @@
   }
 
   function onRemoveFloor(id: string) {
+    floorMenuOpen = '';
     if (floors.length <= 1) return;
     removeFloor(id);
+  }
+
+  function onRenameFloor(id: string) {
+    floorMenuOpen = '';
+    const cur = floors.find((f) => f.id === id);
+    const name = prompt('Floor name:', cur?.name ?? '');
+    if (name !== null && name.trim()) renameFloor(id, name.trim());
   }
 
   async function save() {
@@ -206,9 +217,13 @@
       if (moreOpen && moreRef && !moreRef.contains(e.target as Node)) {
         moreOpen = false;
       }
+      if (floorMenuOpen && floorBarRef && !floorBarRef.contains(e.target as Node)) {
+        floorMenuOpen = '';
+      }
     }
     function handleKeydown(e: KeyboardEvent) {
       if (exportOpen) exportOpen = false;
+      if (e.key === 'Escape' && floorMenuOpen) floorMenuOpen = '';
       if (e.key === 'Escape' && moreOpen) moreOpen = false;
       if (e.key === 'Escape' && versionHistoryOpen) versionHistoryOpen = false;
       if (e.key === 'Escape' && areaOpen) areaOpen = false;
@@ -300,14 +315,38 @@
   <div class="h-5 w-px bg-white/20 max-md:hidden"></div>
 
   <!-- Floor selector as buttons (in overflow menu on mobile) -->
-  <div class="flex items-center gap-1 max-md:hidden">
+  <div class="flex items-center gap-1 max-md:hidden" bind:this={floorBarRef}>
     {#each floors as fl}
-      <button
-        class="px-2 py-0.5 text-xs rounded transition-colors {fl.id === activeFloorId ? 'bg-white text-slate-800 font-semibold' : 'text-white/80 hover:bg-white/10'}"
-        onclick={() => setActiveFloor(fl.id)}
-        ondblclick={() => onRemoveFloor(fl.id)}
-        title={fl.id === activeFloorId ? 'Active floor (dbl-click to remove)' : 'Click to switch, dbl-click to remove'}
-      >{fl.name}</button>
+      <div class="relative flex items-center rounded transition-colors {fl.id === activeFloorId ? 'bg-white text-slate-800' : 'text-white/80 hover:bg-white/10'}">
+        <button
+          class="pl-2 pr-0.5 py-0.5 text-xs {fl.id === activeFloorId ? 'font-semibold' : ''}"
+          onclick={() => setActiveFloor(fl.id)}
+          title="Switch to this floor"
+        >{fl.name}</button>
+        <button
+          class="px-1 py-0.5 text-xs leading-none opacity-70 hover:opacity-100"
+          onclick={(e) => { e.stopPropagation(); floorMenuOpen = floorMenuOpen === fl.id ? '' : fl.id; }}
+          title="Floor options"
+          aria-label="Floor options"
+          aria-haspopup="menu"
+          aria-expanded={floorMenuOpen === fl.id}
+        >⋯</button>
+        {#if floorMenuOpen === fl.id}
+          <div class="absolute left-0 top-full mt-1 z-50 min-w-32 bg-white rounded-md shadow-lg border border-gray-200 py-1" role="menu">
+            <button class="w-full px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 text-left flex items-center gap-2" role="menuitem" onclick={() => onRenameFloor(fl.id)}>
+              <span>✏️</span> Rename
+            </button>
+            <button
+              class="w-full px-3 py-1.5 text-sm text-left flex items-center gap-2 {floors.length <= 1 ? 'text-gray-300 cursor-not-allowed' : 'text-red-600 hover:bg-red-50'}"
+              role="menuitem"
+              disabled={floors.length <= 1}
+              onclick={() => onRemoveFloor(fl.id)}
+            >
+              <span>🗑️</span> Delete
+            </button>
+          </div>
+        {/if}
+      </div>
     {/each}
     <button
       onclick={onAddFloor}
