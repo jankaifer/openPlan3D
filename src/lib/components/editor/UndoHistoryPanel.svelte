@@ -37,36 +37,29 @@
       </div>
     </div>
 
-    <!-- Steps list -->
+    <!-- Steps list (newest first — clicking the top past row goes back exactly one step) -->
     <div class="flex-1 overflow-y-auto">
       {#if history.entries.length === 0}
         <div class="px-3 py-6 text-center text-xs text-gray-400">No history yet</div>
       {:else}
         <div class="py-1">
-          {#each history.entries as entry, i}
+          <!-- Current state indicator, pinned at top -->
+          <div class="w-full px-3 py-1.5 flex items-center gap-2 text-xs bg-blue-100 text-blue-700">
+            <span class="w-5 text-[10px] text-blue-400 text-right shrink-0">●</span>
+            <span class="truncate flex-1 font-medium">Current state</span>
+          </div>
+          {#each [...history.entries].reverse() as entry, revI}
+            {@const i = history.entries.length - 1 - revI}
             <button
-              class="w-full px-3 py-1.5 text-left flex items-center gap-2 text-xs hover:bg-blue-50 transition-colors"
-              class:bg-blue-100={i === history.currentIndex}
-              class:text-blue-700={i === history.currentIndex}
-              class:text-gray-500={i > history.currentIndex}
-              class:text-gray-700={i < history.currentIndex && i !== history.currentIndex}
+              class="w-full px-3 py-1.5 text-left flex items-center gap-2 text-xs text-gray-700 hover:bg-blue-50 transition-colors"
               onclick={() => handleClick(i)}
+              title="Go back to this state"
             >
-              <span class="w-5 text-[10px] text-gray-400 text-right shrink-0">{i + 1}</span>
+              <span class="w-5 text-[10px] text-gray-400 text-right shrink-0">{revI === 0 ? '↩' : i + 1}</span>
               <span class="truncate flex-1">{entry.description}</span>
               <span class="text-[10px] text-gray-300 shrink-0">{formatTime(entry.timestamp)}</span>
             </button>
           {/each}
-          <!-- Current state indicator -->
-          <div
-            class="w-full px-3 py-1.5 flex items-center gap-2 text-xs"
-            class:bg-blue-100={history.currentIndex === history.entries.length}
-            class:text-blue-700={history.currentIndex === history.entries.length}
-            class:text-gray-700={history.currentIndex !== history.entries.length}
-          >
-            <span class="w-5 text-[10px] text-gray-400 text-right shrink-0">●</span>
-            <span class="truncate flex-1 font-medium">Current state</span>
-          </div>
         </div>
       {/if}
     </div>

@@ -20,6 +20,9 @@
   const DEFAULT_DOOR_HEIGHT = 210; // cm
   const DEFAULT_SILL = 90;         // cm
   const GRID_STEP = 50;            // cm (0.5 m)
+  const HANDLE_PX = 7;             // half-size of a resize handle square (screen px)
+  const HANDLE_HIT = 10;           // hit radius for grabbing a resize handle (screen px)
+  const MIN_OPENING = 20;          // cm — smallest width/height a drag-resize allows
 
   let units = $derived($projectSettings.units);
 
@@ -78,6 +81,8 @@
 
   let hoverOpeningId = $state<string | null>(null);
   let dragging = $state(false);
+  let handleCursor = $state<string | null>(null);
+  let dragCursor = $state<string | null>(null);
 
   function selectElement(id: string | null) {
     selectedElementId.set(id);
@@ -193,26 +198,37 @@
     return null;
   }
 
-  /** Clamp an opening's center position t so it stays inside the wall,
-   *  matching the 2D editor's positionOnWall() clamp of [0.1, 0.9]. */
+  /** Clamp an opening's center position t so its edges stay inside the wall,
+   *  keeping a small 5 cm margin from each wall end. */
   function clampPosition(t: number, width: number): number {
+    const marginT = 5 / Math.max(1, wallLen);
     const half = width / 2 / Math.max(1, wallLen);
-    let lo = Math.max(0.1, half);
-    let hi = Math.min(0.9, 1 - half);
+    let lo = marginT + half;
+    let hi = 1 - marginT - half;
     if (lo > hi) { lo = 0.5; hi = 0.5; }
     return Math.max(lo, Math.min(hi, t));
   }
 
   // ── Drag state ────────────────────────────────────────────────────
+  type HX = 'l' | 'r' | null;
+  type HY = 't' | 'b' | null;
   let drag: {
     id: string;
     kind: 'door' | 'window';
+    mode: 'move' | 'resize';
     startPx: number;
     startPy: number;
     startPos: number;   // position t at drag start
     startSill: number;  // window sill at drag start (cm)
     width: number;      // opening width (cm)
     winH: number;       // window height (cm)
+    // Resize: which edges follow the pointer, and the fixed edges captured at start (cm)
+    hx: HX;
+    hy: HY;
+    startLeft: number;
+    startRight: number;
+    startBottom: number;
+    startTop: number;
     grouped: boolean;   // beginUndoGroup() called
   } | null = null;
 
@@ -221,47 +237,149 @@
     return { x: (e.offsetX - geom.ox) / geom.scale, y: (geom.floorY - e.offsetY) / geom.scale };
   }
 
+  /** The currently selected opening's rect on this wall, if any. */
+  function selectedRect(): OpeningRect | null {
+    if (!selectedOpeningId) return null;
+    return openingRects().find((r) => r.id === selectedOpeningId) ?? null;
+  }
+
+  /** Screen-space center of each resize handle for a rect. */
+  function handlePoints(r: OpeningRect): { hx: HX; hy: HY; sx: number; sy: number }[] {
+    if (!geom) return [];
+    const { scale, ox, floorY } = geom;
+    const left = ox + r.x * scale;
+    const right = ox + (r.x + r.w) * scale;
+    const top = floorY - (r.y + r.h) * scale;
+    const bottom = floorY - r.y * scale;
+    const midX = (left + right) / 2;
+    const midY = (top + bottom) / 2;
+    const pts: { hx: HX; hy: HY; sx: number; sy: number }[] = [
+      { hx: 'l', hy: 't', sx: left, sy: top },
+      { hx: 'r', hy: 't', sx: right, sy: top },
+      { hx: 'l', hy: 'b', sx: left, sy: bottom },
+      { hx: 'r', hy: 'b', sx: right, sy: bottom },
+      { hx: null, hy: 't', sx: midX, sy: top },
+      { hx: null, hy: 'b', sx: midX, sy: bottom },
+      { hx: 'l', hy: null, sx: left, sy: midY },
+      { hx: 'r', hy: null, sx: right, sy: midY },
+    ];
+    // Doors sit on the floor — no bottom handles (the sill is fixed at 0).
+    return r.kind === 'door' ? pts.filter((p) => p.hy !== 'b') : pts;
+  }
+
+  /** The resize handle of the selected opening under a screen point, if any. */
+  function handleAt(offsetX: number, offsetY: number): { hx: HX; hy: HY } | null {
+    const r = selectedRect();
+    if (!r) return null;
+    for (const p of handlePoints(r)) {
+      if (Math.hypot(offsetX - p.sx, offsetY - p.sy) <= HANDLE_HIT) return { hx: p.hx, hy: p.hy };
+    }
+    return null;
+  }
+
+  function cursorForHandle(hx: HX, hy: HY): string {
+    if (hx && hy) return (hx === 'l') === (hy === 't') ? 'nwse-resize' : 'nesw-resize';
+    if (hx) return 'ew-resize';
+    return 'ns-resize';
+  }
+
+  function startDrag(id: string, kind: 'door' | 'window', r: OpeningRect, e: PointerEvent, mode: 'move' | 'resize', hx: HX = null, hy: HY = null) {
+    const door = kind === 'door' ? doors.find((d) => d.id === id) : undefined;
+    const win = kind === 'window' ? windows.find((w) => w.id === id) : undefined;
+    drag = {
+      id,
+      kind,
+      mode,
+      startPx: e.offsetX,
+      startPy: e.offsetY,
+      startPos: (door?.position ?? win?.position) ?? 0.5,
+      startSill: win?.sillHeight ?? DEFAULT_SILL,
+      width: r.w,
+      winH: win?.height ?? 0,
+      hx,
+      hy,
+      startLeft: r.x,
+      startRight: r.x + r.w,
+      startBottom: r.y,
+      startTop: r.y + r.h,
+      grouped: false,
+    };
+    dragging = true;
+    dragCursor = mode === 'resize' ? cursorForHandle(hx, hy) : 'grabbing';
+    canvas?.setPointerCapture(e.pointerId);
+  }
+
   function onPointerDown(e: PointerEvent) {
     if (!wall || !geom) return;
     e.preventDefault();
+    // Resize handles of the already-selected opening take priority over move/select
+    const h = handleAt(e.offsetX, e.offsetY);
+    if (h) {
+      const r = selectedRect();
+      if (r) { startDrag(r.id, r.kind, r, e, 'resize', h.hx, h.hy); return; }
+    }
     const p = toWallCoords(e);
     if (!p) return;
     const hit = hitOpening(p.x, p.y);
     if (hit) {
       // Global selection: the PropertiesPanel now shows this opening
       selectElement(hit.id);
-      const door = hit.kind === 'door' ? doors.find((d) => d.id === hit.id) : undefined;
-      const win = hit.kind === 'window' ? windows.find((w) => w.id === hit.id) : undefined;
-      drag = {
-        id: hit.id,
-        kind: hit.kind,
-        startPx: e.offsetX,
-        startPy: e.offsetY,
-        startPos: (door?.position ?? win?.position) ?? 0.5,
-        startSill: win?.sillHeight ?? DEFAULT_SILL,
-        width: hit.w,
-        winH: win?.height ?? 0,
-        grouped: false,
-      };
-      dragging = true;
-      canvas?.setPointerCapture(e.pointerId);
+      startDrag(hit.id, hit.kind, hit, e, 'move');
     } else {
       // Empty wall area — selection falls back to the wall itself
       selectElement(wall.id);
     }
   }
 
+  /** Apply a resize drag: move the grabbed edge(s) to the pointer, keep the
+   *  opposite edge(s) fixed, clamp to the wall and a minimum size. */
+  function applyResize(mx: number, my: number) {
+    if (!drag) return;
+    let left = drag.startLeft, right = drag.startRight;
+    let bottom = drag.startBottom, top = drag.startTop;
+    if (drag.hx === 'l') left = mx; else if (drag.hx === 'r') right = mx;
+    if (drag.hy === 't') top = my; else if (drag.hy === 'b') bottom = my;
+    // Enforce a minimum size against the fixed edge
+    if (right - left < MIN_OPENING) {
+      if (drag.hx === 'l') left = right - MIN_OPENING; else right = left + MIN_OPENING;
+    }
+    if (top - bottom < MIN_OPENING) {
+      if (drag.hy === 'b') bottom = top - MIN_OPENING; else top = bottom + MIN_OPENING;
+    }
+    // Clamp inside the wall face
+    left = Math.max(0, left); right = Math.min(wallLen, right);
+    bottom = Math.max(0, bottom); top = Math.min(wallH, top);
+    const width = Math.max(MIN_OPENING, right - left);
+    const center = (left + right) / 2;
+    const position = clampPosition(center / Math.max(1, wallLen), width);
+    if (drag.kind === 'door') {
+      updateDoor(drag.id, { position, width: Math.round(width), height: Math.round(top - bottom) });
+    } else {
+      updateWindow(drag.id, {
+        position,
+        width: Math.round(width),
+        height: Math.round(top - bottom),
+        sillHeight: Math.round(bottom),
+      });
+    }
+  }
+
   function onPointerMove(e: PointerEvent) {
     if (!wall || !geom) return;
     if (drag) {
-      const dxCm = (e.offsetX - drag.startPx) / geom.scale;
-      const dyCm = (drag.startPy - e.offsetY) / geom.scale; // up is positive
       if (!drag.grouped) {
         // Ignore sub-2px jitter so a plain click never creates an undo entry
         if (Math.hypot(e.offsetX - drag.startPx, e.offsetY - drag.startPy) < 2) return;
         beginUndoGroup();
         drag.grouped = true;
       }
+      if (drag.mode === 'resize') {
+        const p = toWallCoords(e);
+        if (p) applyResize(p.x, p.y);
+        return;
+      }
+      const dxCm = (e.offsetX - drag.startPx) / geom.scale;
+      const dyCm = (drag.startPy - e.offsetY) / geom.scale; // up is positive
       const newPos = clampPosition(drag.startPos + dxCm / Math.max(1, wallLen), drag.width);
       if (drag.kind === 'door') {
         updateDoor(drag.id, { position: newPos });
@@ -272,6 +390,14 @@
       }
       return;
     }
+    // Hover: a resize handle of the selected opening wins over the opening body
+    const h = handleAt(e.offsetX, e.offsetY);
+    if (h) {
+      handleCursor = cursorForHandle(h.hx, h.hy);
+      hoverOpeningId = selectedOpeningId;
+      return;
+    }
+    handleCursor = null;
     const p = toWallCoords(e);
     hoverOpeningId = p ? (hitOpening(p.x, p.y)?.id ?? null) : null;
   }
@@ -279,15 +405,22 @@
   function endDrag(e: PointerEvent) {
     if (drag) {
       if (drag.grouped) {
-        endUndoGroup(drag.kind === 'door' ? 'Moved door (elevation)' : 'Moved window (elevation)');
+        const noun = drag.kind === 'door' ? 'door' : 'window';
+        endUndoGroup(`${drag.mode === 'resize' ? 'Resized' : 'Moved'} ${noun} (elevation)`);
       }
       drag = null;
       dragging = false;
+      dragCursor = null;
       try { canvas?.releasePointerCapture(e.pointerId); } catch { /* already released */ }
     }
   }
 
-  let cursor = $derived(dragging ? 'grabbing' : hoverOpeningId ? 'move' : 'default');
+  let cursor = $derived(
+    dragCursor ? dragCursor
+    : handleCursor ? handleCursor
+    : hoverOpeningId ? 'move'
+    : 'default'
+  );
 
   // ── Drawing ───────────────────────────────────────────────────────
 
@@ -444,6 +577,14 @@
       ctx.setLineDash([5, 3]);
       ctx.strokeRect(px - 3, py - 3, pw + 6, ph + 6);
       ctx.setLineDash([]);
+      // Resize handles (corners + edge midpoints)
+      for (const hp of handlePoints(selRect)) {
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(hp.sx - HANDLE_PX, hp.sy - HANDLE_PX, HANDLE_PX * 2, HANDLE_PX * 2);
+        ctx.strokeRect(hp.sx - HANDLE_PX, hp.sy - HANDLE_PX, HANDLE_PX * 2, HANDLE_PX * 2);
+      }
       // Width above the opening
       drawDimH(ctx, px, px + pw, py - 14, formatLength(selRect.w, u));
       // Height to the right of the opening
@@ -479,7 +620,7 @@
       >›</button>
       <span class="text-xs text-gray-400 ml-1">{formatLength(wallLen, units)} × {formatLength(wallH, units)}</span>
       <div class="flex-1"></div>
-      <span class="text-[11px] text-gray-400 max-lg:hidden">Drag openings to move · drag windows up/down for sill · Esc for plan</span>
+      <span class="text-[11px] text-gray-400 max-lg:hidden">Drag to move · drag the handles to resize · Esc for plan</span>
     </div>
 
     <!-- Elevation canvas -->

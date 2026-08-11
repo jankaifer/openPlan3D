@@ -68,6 +68,10 @@
   let dragWasWallSnapped: boolean = false;
   let draggingDoorId: string | null = $state(null);
   let draggingWindowId: string | null = $state(null);
+  // Resizing a window by dragging one of its ends along the wall (2D plan view).
+  // `fixedT` is the t-position of the opposite (anchored) end.
+  let resizingWindow: { id: string; wallId: string; fixedT: number } | null = $state(null);
+  let hoverWindowHandle = $state(false);
 
   // Guide lines
   let selectedGuideId: string | null = $state(null);
@@ -1188,6 +1192,17 @@
             ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
             ctx.setLineDash([]);
             ctx.restore();
+            // End resize handles (drag along the wall to change width)
+            for (const h of windowEndHandles(win)) {
+              const hp = worldToScreen(h.pt.x, h.pt.y);
+              ctx.fillStyle = '#ffffff';
+              ctx.strokeStyle = '#3b82f6';
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.arc(hp.x, hp.y, 5, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            }
           }
           if (showDimensions && isSelected(win.id)) drawWindowDistanceDimensions(wall, win);
         }
@@ -1978,6 +1993,59 @@
     return _findWindowAt(p, currentFloor.windows, currentFloor.walls, zoom);
   }
 
+  /** Raw (unclamped) parameter t of the wall point nearest `p`, in [0,1].
+   *  Unlike positionOnWall(), this does NOT clamp to [0.1,0.9], so an opening
+   *  edge can be dragged close to the wall ends. */
+  function rawTOnWall(p: Point, wall: Wall): number {
+    if (wall.curvePoint) {
+      let bestT = 0.5, bestDist = Infinity;
+      for (let i = 0; i <= 40; i++) {
+        const t = i / 40;
+        const pt = wallPointAt(wall, t);
+        const d = Math.hypot(p.x - pt.x, p.y - pt.y);
+        if (d < bestDist) { bestDist = d; bestT = t; }
+      }
+      return bestT;
+    }
+    const dx = wall.end.x - wall.start.x, dy = wall.end.y - wall.start.y;
+    const len2 = dx * dx + dy * dy;
+    if (len2 === 0) return 0.5;
+    return Math.max(0, Math.min(1, ((p.x - wall.start.x) * dx + (p.y - wall.start.y) * dy) / len2));
+  }
+
+  /** World-space endpoints of a window's opening along its wall, with the
+   *  t-position of each end (used for the 2D drag-to-resize handles). */
+  function windowEndHandles(win: Win): { end: 'a' | 'b'; t: number; pt: Point }[] {
+    if (!currentFloor) return [];
+    const wall = currentFloor.walls.find((w) => w.id === win.wallId);
+    if (!wall) return [];
+    const len = wallLength(wall);
+    if (len <= 0) return [];
+    const halfT = win.width / 2 / len;
+    const ta = Math.max(0, win.position - halfT);
+    const tb = Math.min(1, win.position + halfT);
+    return [
+      { end: 'a', t: ta, pt: wallPointAt(wall, ta) },
+      { end: 'b', t: tb, pt: wallPointAt(wall, tb) },
+    ];
+  }
+
+  /** If a window is selected and `p` is near one of its end handles, return it. */
+  function findWindowEndHandleAt(p: Point): { win: Win; end: 'a' | 'b'; fixedT: number } | null {
+    if (!currentFloor || !currentSelectedId) return null;
+    const win = currentFloor.windows.find((w) => w.id === currentSelectedId);
+    if (!win) return null;
+    const threshold = 10 / zoom;
+    const handles = windowEndHandles(win);
+    for (const h of handles) {
+      if (Math.hypot(p.x - h.pt.x, p.y - h.pt.y) <= threshold) {
+        const other = handles.find((o) => o.end !== h.end);
+        return { win, end: h.end, fixedT: other ? other.t : win.position };
+      }
+    }
+    return null;
+  }
+
   function findRoomLabelAt(p: Point): Room | null {
     if (!currentFloor || !showRoomLabels) return null;
     for (const room of detectedRooms) {
@@ -2334,6 +2402,12 @@
         selectedRoomId.set(null);
       }
 
+      // Resize the selected window by its end handles (takes priority over move)
+      const winEnd = findWindowEndHandleAt(wp);
+      if (winEnd) {
+        resizingWindow = { id: winEnd.win.id, wallId: winEnd.win.wallId, fixedT: winEnd.fixedT };
+        return;
+      }
       // Check doors/windows first (they sit on walls, so check before walls)
       const door = findDoorAt(wp);
       if (door) {
@@ -2428,6 +2502,7 @@
           selectedElementId.set(null);
           selectedElementIds.set(new Set());
           // Start room drag
+          commitFurnitureMove(); // snapshot pre-drag baseline for undo
           draggingRoomId = room.id;
           roomDragStartMouse = { x: wp.x, y: wp.y };
           roomDragStartPositions.clear();
@@ -2543,6 +2618,9 @@
     markDirty();
     const rect = canvas.getBoundingClientRect();
     mousePos = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+
+    // Cursor hint when hovering a selected window's end-resize handle
+    hoverWindowHandle = !resizingWindow && currentTool === 'select' && !!findWindowEndHandleAt(mousePos);
 
     // Drag room label
     if (draggingRoomLabelId) {
@@ -2788,7 +2866,24 @@
         }
       }
     }
-    if (draggingWindowId && currentFloor) {
+    if (resizingWindow && currentFloor) {
+      const wall = currentFloor.walls.find(w => w.id === resizingWindow!.wallId);
+      if (wall) {
+        const len = wallLength(wall);
+        const pointerT = rawTOnWall(mousePos, wall);
+        const fixedT = resizingWindow.fixedT;
+        const minWidthT = 20 / Math.max(1, len); // 20 cm minimum
+        const marginT = 5 / Math.max(1, len);    // keep 5 cm from each wall end
+        let dragT = pointerT;
+        // Keep the dragged end on the correct side of the anchor and above min width
+        if (dragT >= fixedT) dragT = Math.max(dragT, fixedT + minWidthT);
+        else dragT = Math.min(dragT, fixedT - minWidthT);
+        dragT = Math.max(marginT, Math.min(1 - marginT, dragT));
+        const newWidth = Math.abs(dragT - fixedT) * len;
+        const newPos = (dragT + fixedT) / 2;
+        updateWindow(resizingWindow.id, { position: newPos, width: Math.round(newWidth) });
+      }
+    } else if (draggingWindowId && currentFloor) {
       const win = currentFloor.windows.find(w => w.id === draggingWindowId);
       if (win) {
         const wall = currentFloor.walls.find(w => w.id === win.wallId);
@@ -2901,16 +2996,11 @@
       marqueeEnd = null;
     }
 
-    if (draggingFurnitureId) commitFurnitureMove();
-    if (draggingHandle) commitFurnitureMove();
-    if (draggingWallEndpoint) commitFurnitureMove();
-    if (draggingWallParallel) commitFurnitureMove();
-    if (draggingCurveHandle) commitFurnitureMove();
-    if (draggingMultiSelect) commitFurnitureMove();
-    if (draggingRoomId) commitFurnitureMove();
-    if (draggingStairId) commitFurnitureMove();
-    if (draggingColumnId) commitFurnitureMove();
-    if (draggingTextAnnotationId) commitFurnitureMove();
+    // NOTE: the undo snapshot for every drag is taken once at pointerdown (drag
+    // start), capturing the pre-drag baseline. Do NOT snapshot again here on
+    // pointerup — doing so pushed the post-drag state as an extra history entry,
+    // which made the first Ctrl+Z a no-op and evicted real history from the
+    // 50-entry stack twice as fast.
     draggingTextAnnotationId = null;
     draggingRoomId = null;
     roomDragStartPositions.clear();
@@ -2924,6 +3014,7 @@
     draggingColumnId = null;
     draggingDoorId = null;
     draggingWindowId = null;
+    resizingWindow = null;
     draggingHandle = null;
     draggingWallEndpoint = null;
     draggingConnectedEndpoints = [];
@@ -3698,6 +3789,7 @@
     draggingFurnitureId ? 'move' :
     draggingRoomId ? 'move' :
     draggingMultiSelect ? 'move' :
+    resizingWindow ? 'move' :
     draggingDoorId ? 'move' :
     draggingWindowId ? 'move' :
     draggingStairId ? 'move' :
@@ -3710,6 +3802,7 @@
     (draggingHandle === 'resize-t' || draggingHandle === 'resize-b') ? 'ns-resize' :
     (draggingHandle === 'resize-l' || draggingHandle === 'resize-r') ? 'ew-resize' :
     draggingHandle?.startsWith('resize') ? 'nwse-resize' :
+    hoverWindowHandle ? 'move' :
     currentTool === 'text' ? 'text' :
     currentTool === 'select' ? 'default' :
     currentTool === 'furniture' ? 'copy' :

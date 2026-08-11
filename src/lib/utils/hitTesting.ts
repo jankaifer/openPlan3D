@@ -7,7 +7,7 @@ import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, Fl
 import type { Room } from '$lib/models/types';
 import { getCatalogItem } from '$lib/utils/furnitureCatalog';
 import { getRoomPolygon } from '$lib/utils/roomDetection';
-import { wallPointAt } from '$lib/utils/canvasRenderer';
+import { wallPointAt, wallLength } from '$lib/utils/canvasRenderer';
 import type { HandleType } from '$lib/utils/canvasInteraction';
 
 export function pointInPolygon(p: Point, poly: Point[]): boolean {
@@ -145,24 +145,44 @@ export function findStairAt(p: Point, stairs: Stair[] | undefined): Stair | null
   return null;
 }
 
+/** Distance (world units) from p to the opening's segment along its wall.
+ *  The opening spans `width` cm centered at `position`, so it is bounded by the
+ *  two wall points at position ± halfWidth. Returns Infinity if the wall is
+ *  degenerate. */
+function distToOpening(p: Point, wall: Wall, position: number, width: number): number {
+  const len = wallLength(wall);
+  if (len <= 0) return Infinity;
+  const halfT = width / 2 / len;
+  const a = wallPointAt(wall, Math.max(0, position - halfT));
+  const b = wallPointAt(wall, Math.min(1, position + halfT));
+  return pointToSegmentDist(p, a, b);
+}
+
 export function findDoorAt(p: Point, doors: Door[], walls: Wall[], zoom: number): Door | null {
+  let best: Door | null = null;
+  let bestDist = Infinity;
   for (const d of doors) {
     const wall = walls.find(w => w.id === d.wallId);
     if (!wall) continue;
-    const cp = wallPointAt(wall, d.position);
-    if (Math.hypot(p.x - cp.x, p.y - cp.y) < (d.width / 2 + 5) / zoom) return d;
+    // Perpendicular tolerance: half the wall thickness plus ~6 screen px.
+    const tol = wall.thickness / 2 + 6 / zoom;
+    const dist = distToOpening(p, wall, d.position, d.width);
+    if (dist <= tol && dist < bestDist) { best = d; bestDist = dist; }
   }
-  return null;
+  return best;
 }
 
 export function findWindowAt(p: Point, windows: Win[], walls: Wall[], zoom: number): Win | null {
+  let best: Win | null = null;
+  let bestDist = Infinity;
   for (const w of windows) {
     const wall = walls.find(wl => wl.id === w.wallId);
     if (!wall) continue;
-    const cp = wallPointAt(wall, w.position);
-    if (Math.hypot(p.x - cp.x, p.y - cp.y) < (w.width / 2 + 5) / zoom) return w;
+    const tol = wall.thickness / 2 + 6 / zoom;
+    const dist = distToOpening(p, wall, w.position, w.width);
+    if (dist <= tol && dist < bestDist) { best = w; bestDist = dist; }
   }
-  return null;
+  return best;
 }
 
 export function findRoomAt(p: Point, rooms: Room[], walls: Wall[]): Room | null {
