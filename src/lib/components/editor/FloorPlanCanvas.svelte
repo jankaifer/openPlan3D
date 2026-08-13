@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { activeFloor, selectedTool, selectedElementId, selectedElementIds, selectedRoomId, addWall, addDoor, addWindow, updateWall, moveWallEndpoint, updateDoor, updateWindow, addFurniture, moveFurniture, commitFurnitureMove, rotateFurniture, setFurnitureRotation, scaleFurniture, removeElement, placingFurnitureId, placingRotation, placingDoorType, placingWindowType, detectedRoomsStore, duplicateDoor, duplicateWindow, duplicateFurniture, duplicateWall, moveWallParallel, splitWall, snapEnabled, placingStair, addStair, moveStair, updateStair, placingColumn, placingColumnShape, addColumn, moveColumn, updateColumn, calibrationMode, calibrationPoints, updateBackgroundImage, setBackgroundImage, canvasZoom, canvasCamX, canvasCamY, panMode, showFurnitureStore, addGuide, moveGuide, removeGuide, beginUndoGroup, endUndoGroup, layerVisibility, updateRoom, addMeasurement, removeMeasurement, addAnnotation, removeAnnotation, updateAnnotation, addTextAnnotation, removeTextAnnotation, updateTextAnnotation, moveTextAnnotation, toggleFurnitureLock, createGroup, ungroupElements, findGroupForElement, placingEntourageId, addEntourageItem, moveEntourage, resizeEntourage, currentProject, elevationWallId, elevationPickMode } from '$lib/stores/project';
-  import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, GuideLine, Measurement, Annotation, TextAnnotation, CustomEntourageDef } from '$lib/models/types';
+  import type { Point, Wall, Door, Window as Win, FurnitureItem, Stair, Column, GuideLine, Measurement, Annotation, TextAnnotation, CustomEntourageDef, Project } from '$lib/models/types';
   import type { Floor, Room } from '$lib/models/types';
   import { detectRooms, getRoomPolygon, roomCentroid } from '$lib/utils/roomDetection';
   import { getMaterial } from '$lib/utils/materials';
@@ -16,6 +16,10 @@
   import type { CanvasState } from '$lib/utils/canvasInteraction';
   import { drawWall as _drawWall, drawDoorOnWall as _drawDoorOnWall, drawWindowOnWall as _drawWindowOnWall, drawDoorDistanceDimensions as _drawDoorDistanceDimensions, drawWindowDistanceDimensions as _drawWindowDistanceDimensions, drawFurnitureItem, drawStair as _drawStair, drawColumn as _drawColumn, drawGuides as _drawGuides, drawPersistedMeasurements as _drawPersistedMeasurements, drawTextAnnotations as _drawTextAnnotations, drawAnnotation as _drawAnnotation, drawAnnotations as _drawAnnotations, drawRooms as _drawRooms, drawWallJoints as _drawWallJoints, drawSnapPoints as _drawSnapPoints, drawMinimap as _drawMinimap, drawEntourageItems as _drawEntourageItems, drawEntourageGhost as _drawEntourageGhost, entourageAspect } from '$lib/utils/canvasRenderer';
   import { getEntourageDef } from '$lib/utils/entourageCatalog';
+  import { gisTool, activeGisLayerId, selectedGisFeatureId, draftGisFeatureId, showContours, contourInterval, addGisFeature, updateGisFeature, deleteGisFeature, structTool, addBeam, addSlab, addRoof } from '$lib/stores/project';
+  import { drawContours as _drawContours, drawGisFeatures as _drawGisFeatures, findGisFeatureAt } from './gisRenderer';
+  import { makeFeature } from '$lib/utils/gis';
+  import { sjtskFromPlan } from '$lib/utils/geo';
   import { pointInPolygon, positionOnWall, findWallAt as _findWallAt, findHandleAt as _findHandleAt, findFurnitureAt as _findFurnitureAt, findColumnAt as _findColumnAt, findStairAt as _findStairAt, findDoorAt as _findDoorAt, findWindowAt as _findWindowAt, findRoomAt as _findRoomAt, hitTestMeasurement as _hitTestMeasurement, hitTestAnnotation as _hitTestAnnotation, hitTestTextAnnotation as _hitTestTextAnnotation, findEntourageAt } from '$lib/utils/hitTesting';
 
   let canvas: HTMLCanvasElement;
@@ -158,6 +162,17 @@
   let columnDragOffset: Point = { x: 0, y: 0 };
   let isCalibrating: boolean = $state(false);
   let calPoints: Point[] = $state([]);
+  // Site / GIS drawing state
+  let projectRef: Project | null = $state(null);
+  let currentGisTool: 'point' | 'line' | 'polygon' | null = $state(null);
+  let currentGisFeatureId: string | null = $state(null);
+  let currentGisDraftId: string | null = $state(null);
+  let contoursVisible: boolean = $state(true);
+  let contourIntervalM: number = $state(0.5);
+  // Structural element drawing state
+  let currentStructTool: 'beam' | 'slab' | 'roof' | null = $state(null);
+  let structDraft: Point[] = $state([]);
+  let beamStart: Point | null = $state(null);
   let bgImage: HTMLImageElement | null = $state(null);
 
   // Room label drag state
@@ -1108,6 +1123,87 @@
     requestAnimationFrame(draw);
   }
 
+  /** Hit-test beams (axis distance) and slab/roof outlines. */
+  function findStructuralAt(floor: Floor, p: Point, tol: number): string | null {
+    const segDist = (a: Point, b: Point) => {
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const l2 = dx * dx + dy * dy;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2)) : 0;
+      return Math.hypot(a.x + t * dx - p.x, a.y + t * dy - p.y);
+    };
+    for (const b of floor.beams ?? []) {
+      if (segDist(b.start, b.end) <= tol + b.width / 2) return b.id;
+    }
+    const outlineHit = (outline: Point[]) => {
+      for (let i = 0; i < outline.length; i++) {
+        if (segDist(outline[i], outline[(i + 1) % outline.length]) <= tol) return true;
+      }
+      return false;
+    };
+    for (const r of floor.roofs ?? []) if (outlineHit(r.outline)) return r.id;
+    for (const s of floor.slabs ?? []) if (outlineHit(s.outline)) return s.id;
+    return null;
+  }
+
+  /** 2D plan rendering of beams, slabs and roofs (+ in-progress drafts). */
+  function drawStructuralElements(floor: Floor, isSelected: (id: string) => boolean) {
+    const poly = (outline: Point[], close: boolean) => {
+      ctx.beginPath();
+      outline.forEach((p, i) => {
+        const s = worldToScreen(p.x, p.y);
+        if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+      });
+      if (close) ctx.closePath();
+    };
+    // Slabs: light fill under everything else.
+    for (const s of floor.slabs ?? []) {
+      poly(s.outline, true);
+      ctx.fillStyle = s.color + '55';
+      ctx.fill();
+      ctx.strokeStyle = isSelected(s.id) ? '#3b82f6' : s.color;
+      ctx.lineWidth = isSelected(s.id) ? 2.5 : 1.5;
+      ctx.stroke();
+    }
+    // Roofs: dashed outline (overhead element).
+    for (const r of floor.roofs ?? []) {
+      poly(r.outline, true);
+      ctx.setLineDash([8, 5]);
+      ctx.strokeStyle = isSelected(r.id) ? '#3b82f6' : r.color;
+      ctx.lineWidth = isSelected(r.id) ? 2.5 : 1.5;
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // Beams: double line along the axis.
+    for (const b of floor.beams ?? []) {
+      const a = worldToScreen(b.start.x, b.start.y);
+      const c = worldToScreen(b.end.x, b.end.y);
+      ctx.strokeStyle = isSelected(b.id) ? '#3b82f6' : b.color;
+      ctx.lineWidth = Math.max(2, b.width * zoom);
+      ctx.globalAlpha = 0.65;
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(c.x, c.y); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // Draft outline / beam start marker.
+    if (structDraft.length > 0) {
+      poly(structDraft, false);
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      for (const p of structDraft) {
+        const s = worldToScreen(p.x, p.y);
+        ctx.fillStyle = '#10b981';
+        ctx.beginPath(); ctx.arc(s.x, s.y, 4, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    if (beamStart) {
+      const s = worldToScreen(beamStart.x, beamStart.y);
+      ctx.fillStyle = '#10b981';
+      ctx.beginPath(); ctx.arc(s.x, s.y, 5, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
   function draw() {
     if (!ctx) return;
     if (!canvasDirty) { requestAnimationFrame(draw); return; }
@@ -1118,6 +1214,13 @@
     drawGrid();
     if (layerVis.guides) drawGuides();
     drawBackgroundImage();
+
+    // Site layers: terrain contours + GIS features (under floor geometry).
+    if (projectRef) {
+      const vt = { camX, camY, zoom, width, height };
+      if (contoursVisible) _drawContours(ctx, vt, projectRef, contourIntervalM);
+      _drawGisFeatures(ctx, vt, projectRef, { selectedId: currentGisFeatureId, draftId: currentGisDraftId });
+    }
 
     const floor = currentFloor;
     if (!floor) { requestAnimationFrame(draw); return; }
@@ -1138,6 +1241,8 @@
 
     drawRooms();
     drawSnapPoints();
+
+    drawStructuralElements(floor, isSelected);
 
     if (layerVis.walls) {
       for (const w of floor.walls) drawWall(w, isSelected(w.id));
@@ -1798,7 +1903,13 @@
     const unsub_snapgrid = projectSettings.subscribe((s) => { currentSnapToGrid = s.snapToGrid; currentGridSize = s.gridSize; markDirty(); });
     const unsub11 = placingStair.subscribe((v) => { isPlacingStair = v; markDirty(); });
     const unsubEnt1 = placingEntourageId.subscribe((id) => { currentEntourageDefId = id; markDirty(); });
-    const unsubEnt2 = currentProject.subscribe((pr) => { customEntourageDefs = pr?.customEntourage; markDirty(); });
+    const unsubEnt2 = currentProject.subscribe((pr) => { customEntourageDefs = pr?.customEntourage; projectRef = pr; markDirty(); });
+    const unsub_gis1 = gisTool.subscribe((t) => { currentGisTool = t; markDirty(); });
+    const unsub_gis2 = selectedGisFeatureId.subscribe((id) => { currentGisFeatureId = id; markDirty(); });
+    const unsub_gis3 = draftGisFeatureId.subscribe((id) => { currentGisDraftId = id; markDirty(); });
+    const unsub_gis4 = showContours.subscribe((v) => { contoursVisible = v; markDirty(); });
+    const unsub_gis5 = contourInterval.subscribe((v) => { contourIntervalM = v; markDirty(); });
+    const unsub_struct = structTool.subscribe((t) => { currentStructTool = t; structDraft = []; beamStart = null; markDirty(); });
     const unsub_layers = layerVisibility.subscribe((v) => { layerVis = v; markDirty(); });
     const unsub_col = placingColumn.subscribe((v) => { isPlacingColumn = v; markDirty(); });
     const unsub_cols = placingColumnShape.subscribe((v) => { placingColShape = v; markDirty(); });
@@ -1850,7 +1961,7 @@
     canvas.addEventListener('touchend', onTouchEnd, { passive: false });
     canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
-    return () => { resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub_elevopen(); unsub_elevpick(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); document.removeEventListener('paste', handlePaste); canvas.removeEventListener('touchstart', onTouchStart); canvas.removeEventListener('touchmove', onTouchMove); canvas.removeEventListener('touchend', onTouchEnd); canvas.removeEventListener('touchcancel', onTouchEnd); };
+    return () => { resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub_elevopen(); unsub_elevpick(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); unsub_gis1(); unsub_gis2(); unsub_gis3(); unsub_gis4(); unsub_gis5(); unsub_struct(); document.removeEventListener('paste', handlePaste); canvas.removeEventListener('touchstart', onTouchStart); canvas.removeEventListener('touchmove', onTouchMove); canvas.removeEventListener('touchend', onTouchEnd); canvas.removeEventListener('touchcancel', onTouchEnd); };
   });
 
   /** Compute world bounding box of all elements */
@@ -2094,6 +2205,57 @@
     const rect = canvas.getBoundingClientRect();
     const wp = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     const tool = currentTool;
+
+    // Structural drawing tools (beam: 2 clicks; slab/roof: polygon + dblclick).
+    if (currentStructTool) {
+      const p = { x: snap(wp.x), y: snap(wp.y) };
+      if (currentStructTool === 'beam') {
+        if (!beamStart) beamStart = p;
+        else { addBeam(beamStart, p); beamStart = null; }
+      } else {
+        structDraft = [...structDraft, p];
+      }
+      return;
+    }
+
+    // GIS drawing tools: clicks add survey vertices to the active layer.
+    if (currentGisTool && projectRef?.site) {
+      const s = sjtskFromPlan(projectRef.site, snap(wp.x), snap(wp.y));
+      const layerId = $activeGisLayerId;
+      if (!layerId) return;
+      if (currentGisTool === 'point') {
+        const f = makeFeature(layerId, 'point');
+        f.vertices.push({ x: s.x, y: s.y });
+        addGisFeature(f);
+        selectedGisFeatureId.set(f.id);
+      } else if (currentGisDraftId) {
+        updateGisFeature(currentGisDraftId, (f) => f.vertices.push({ x: s.x, y: s.y }), 'Added vertex');
+      } else {
+        const f = makeFeature(layerId, currentGisTool);
+        f.vertices.push({ x: s.x, y: s.y });
+        addGisFeature(f);
+        draftGisFeatureId.set(f.id);
+        selectedGisFeatureId.set(f.id);
+      }
+      return;
+    }
+    // GIS selection: in select mode, a feature under the cursor wins over
+    // nothing (checked before falling through to plan elements below).
+    if (tool === 'select' && projectRef?.site && !currentGisTool) {
+      const hit = findGisFeatureAt(projectRef, wp.x, wp.y, 10 / zoom + 6);
+      if (hit) { selectedGisFeatureId.set(hit); }
+      else if (currentGisFeatureId) selectedGisFeatureId.set(null);
+    }
+    // Structural element selection (beams by axis, slabs/roofs by outline).
+    if (tool === 'select' && currentFloor) {
+      const structId = findStructuralAt(currentFloor, wp, 10 / zoom + 6);
+      if (structId) {
+        selectedElementId.set(structId);
+        selectedElementIds.set(new Set());
+        selectedRoomId.set(null);
+        return;
+      }
+    }
 
     // Elevation pick mode: the next wall clicked opens its elevation view;
     // clicking empty canvas cancels. Consumes the click either way so the
@@ -2541,6 +2703,25 @@
     const sx = e.clientX - rect.left;
     const sy = e.clientY - rect.top;
     const R = RULER_SIZE;
+
+    // Finish the in-progress slab/roof outline.
+    if (currentStructTool && currentStructTool !== 'beam' && structDraft.length >= 3) {
+      if (currentStructTool === 'slab') addSlab(structDraft);
+      else addRoof(structDraft);
+      structDraft = [];
+      return;
+    }
+
+    // Finish the in-progress GIS line/polygon (the double-click's extra
+    // single-click already added the final vertex).
+    if (currentGisDraftId) {
+      const draftId = currentGisDraftId;
+      draftGisFeatureId.set(null);
+      // Drop degenerate drafts (a line needs 2+, a polygon 3+ vertices).
+      const f = projectRef?.gisFeatures?.find((f) => f.id === draftId);
+      if (f && f.vertices.length < (f.kind === 'polygon' ? 3 : 2)) deleteGisFeature(draftId);
+      return;
+    }
 
     // Double-click on horizontal ruler → add horizontal guide
     if (sy < R && sx > R) {
@@ -3284,8 +3465,26 @@
       return;
     }
 
+    // GIS: Delete removes the selected feature; Escape ends draft/tool.
+    if ((e.key === 'Delete' || e.key === 'Backspace') && currentGisFeatureId && !editingTextAnnotationId) {
+      deleteGisFeature(currentGisFeatureId);
+      e.preventDefault();
+      return;
+    }
+
     // Canvas-specific Escape handling (before global shortcut eats it)
     if (e.code === 'Escape') {
+      if (currentStructTool) {
+        if (structDraft.length > 0 || beamStart) { structDraft = []; beamStart = null; }
+        else structTool.set(null);
+      }
+      if (currentGisDraftId) {
+        const f = projectRef?.gisFeatures?.find((f) => f.id === currentGisDraftId);
+        if (f && f.vertices.length < (f.kind === 'polygon' ? 3 : 2)) deleteGisFeature(currentGisDraftId);
+        draftGisFeatureId.set(null);
+      } else if (currentGisTool) {
+        gisTool.set(null);
+      }
       elevationPickMode.set(false);
       wallStart = null; wallSequenceFirst = null; typedWallLength = '';
       placingFurnitureId.set(null);

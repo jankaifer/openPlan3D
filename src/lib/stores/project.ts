@@ -1,5 +1,5 @@
 import { writable, derived, get } from 'svelte/store';
-import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem, Terrain } from '$lib/models/types';
+import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem, SiteConfig, TerrainModel, GisLayer, GisFeature, Beam, Slab, Roof } from '$lib/models/types';
 
 
 function uid(): string {
@@ -201,16 +201,143 @@ function mutate(fn: (floor: Floor) => void, description?: string, coalesceKey?: 
 }
 
 /**
- * Set (or clear) the project-wide terrain. Does not push its own undo snapshot —
- * terrain sculpting wraps a whole stroke in beginUndoGroup()/endUndoGroup() so it
- * collapses into a single undo entry. Pass `undefined` to remove terrain.
+ * Set (or clear) the project-wide TIN terrain. Does not push its own undo
+ * snapshot — terrain sculpting wraps a whole stroke in beginUndoGroup()/
+ * endUndoGroup() so it collapses into a single undo entry.
  */
-export function setTerrain(terrain: Terrain | undefined) {
+export function setTerrainModel(terrainModel: TerrainModel | undefined) {
   const p = get(currentProject);
   if (!p) return;
-  p.terrain = terrain;
+  p.terrainModel = terrainModel;
   p.updatedAt = new Date();
   currentProject.set({ ...p });
+}
+
+/** Set the site georeference (render origin / geoid offset). */
+export function setSite(site: SiteConfig) {
+  const p = get(currentProject);
+  if (!p) return;
+  snapshot('Changed site georeference');
+  p.site = site;
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
+// ── GIS layers/features (site-level: utility lines, survey points, areas) ──
+
+/** Active GIS drawing tool; null = normal plan editing. */
+export const gisTool = writable<'point' | 'line' | 'polygon' | null>(null);
+export const activeGisLayerId = writable<string | null>(null);
+export const selectedGisFeatureId = writable<string | null>(null);
+/** Draft feature being drawn (line/polygon vertices confirmed so far). */
+export const draftGisFeatureId = writable<string | null>(null);
+export const showContours = writable<boolean>(true);
+export const contourInterval = writable<number>(0.5); // meters
+
+function mutateProject(fn: (p: Project) => void, description?: string) {
+  const p = get(currentProject);
+  if (!p) return;
+  snapshot(description);
+  fn(p);
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
+export function addGisLayer(layer: GisLayer) {
+  mutateProject((p) => { (p.gisLayers ??= []).push(layer); }, `Added layer ${layer.name}`);
+  activeGisLayerId.set(layer.id);
+}
+
+export function updateGisLayer(id: string, patch: Partial<GisLayer>) {
+  mutateProject((p) => {
+    const l = p.gisLayers?.find((l) => l.id === id);
+    if (l) Object.assign(l, patch);
+  }, 'Updated layer');
+}
+
+export function deleteGisLayer(id: string) {
+  mutateProject((p) => {
+    p.gisLayers = (p.gisLayers ?? []).filter((l) => l.id !== id);
+    p.gisFeatures = (p.gisFeatures ?? []).filter((f) => f.layerId !== id);
+  }, 'Deleted layer');
+  if (get(activeGisLayerId) === id) activeGisLayerId.set(null);
+}
+
+export function addGisFeature(feature: GisFeature) {
+  mutateProject((p) => { (p.gisFeatures ??= []).push(feature); }, 'Added GIS feature');
+}
+
+export function updateGisFeature(id: string, fn: (f: GisFeature) => void, description = 'Edited GIS feature') {
+  mutateProject((p) => {
+    const f = p.gisFeatures?.find((f) => f.id === id);
+    if (f) fn(f);
+  }, description);
+}
+
+export function deleteGisFeature(id: string) {
+  mutateProject((p) => { p.gisFeatures = (p.gisFeatures ?? []).filter((f) => f.id !== id); }, 'Deleted GIS feature');
+  if (get(selectedGisFeatureId) === id) selectedGisFeatureId.set(null);
+}
+
+/** Replace site + terrain in one undo step (RTK import). */
+export function applyTerrainImport(site: SiteConfig, terrainModel: TerrainModel) {
+  mutateProject((p) => {
+    p.site = site;
+    p.terrainModel = terrainModel;
+  }, 'Imported RTK terrain');
+}
+
+// ── Structural elements: beams, slabs, roofs ──────────────────────────────
+
+/** Active structural drawing tool; null = normal editing. */
+export const structTool = writable<'beam' | 'slab' | 'roof' | null>(null);
+
+export function addBeam(start: Point, end: Point): string {
+  const id = uid();
+  mutate((f) => {
+    (f.beams ??= []).push({ id, start, end, width: 15, depth: 20, elevation: 260, color: '#8b5a2b' });
+  }, 'Added beam');
+  return id;
+}
+
+export function updateBeam(id: string, patch: Partial<Beam>) {
+  mutate((f) => {
+    const b = f.beams?.find((b) => b.id === id);
+    if (b) Object.assign(b, patch);
+  }, 'Updated beam', `beam_${id}`);
+}
+
+export function addSlab(outline: Point[]): string {
+  const id = uid();
+  mutate((f) => {
+    (f.slabs ??= []).push({ id, outline, thickness: 20, elevation: 0, kind: 'terrace', color: '#b8b2a7' });
+  }, 'Added slab');
+  return id;
+}
+
+export function updateSlab(id: string, patch: Partial<Slab>) {
+  mutate((f) => {
+    const s = f.slabs?.find((s) => s.id === id);
+    if (s) Object.assign(s, patch);
+  }, 'Updated slab', `slab_${id}`);
+}
+
+export function addRoof(outline: Point[]): string {
+  const id = uid();
+  mutate((f) => {
+    (f.roofs ??= []).push({
+      id, outline, kind: 'gable', pitchDeg: 35, overhang: 40,
+      baseElevation: 280, thickness: 20, color: '#7a4a32'
+    });
+  }, 'Added roof');
+  return id;
+}
+
+export function updateRoof(id: string, patch: Partial<Roof>) {
+  mutate((f) => {
+    const r = f.roofs?.find((r) => r.id === id);
+    if (r) Object.assign(r, patch);
+  }, 'Updated roof', `roof_${id}`);
 }
 
 export function addWall(start: Point, end: Point): string {
@@ -508,6 +635,9 @@ export function removeElement(id: string) {
     if (f.columns) f.columns = f.columns.filter((c) => c.id !== id);
     if (f.textAnnotations) f.textAnnotations = f.textAnnotations.filter((t) => t.id !== id);
     if (f.entourage) f.entourage = f.entourage.filter((e) => e.id !== id);
+    if (f.beams) f.beams = f.beams.filter((b) => b.id !== id);
+    if (f.slabs) f.slabs = f.slabs.filter((s) => s.id !== id);
+    if (f.roofs) f.roofs = f.roofs.filter((r) => r.id !== id);
   }, 'Deleted element');
 }
 

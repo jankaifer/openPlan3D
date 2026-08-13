@@ -7,8 +7,10 @@
   import BuildPanel from '$lib/components/sidebar/BuildPanel.svelte';
   import PropertiesPanel from '$lib/components/sidebar/PropertiesPanel.svelte';
   import LayersPanel from '$lib/components/sidebar/LayersPanel.svelte';
+  import SitePanel from '$lib/components/sidebar/SitePanel.svelte';
 
   let showLayers = $state(false);
+  let showSite = $state(false);
   import FloorPlanCanvas from '$lib/components/editor/FloorPlanCanvas.svelte';
   import AlignmentToolbar from '$lib/components/editor/AlignmentToolbar.svelte';
   import UndoHistoryPanel from '$lib/components/editor/UndoHistoryPanel.svelte';
@@ -197,6 +199,9 @@
       {#if showLayers && mode === '2d'}
         <LayersPanel />
       {/if}
+      {#if showSite && mode === '2d'}
+        <SitePanel />
+      {/if}
       <PropertiesPanel is3D={mode === '3d'} />
     </div>
   </div>
@@ -225,6 +230,20 @@
       title="Layers Panel (L)"
       aria-label="Toggle Layers Panel"
     >🗂</button>
+  {/if}
+
+  <!-- Site & Survey toggle button -->
+  {#if mode === '2d'}
+    <button
+      class="fixed bottom-4 max-md:bottom-20 left-[8.5rem] max-md:left-4 w-8 h-8 rounded-full shadow-lg hover:bg-slate-600 transition-colors z-50 text-sm"
+      class:bg-emerald-600={showSite}
+      class:text-white={showSite}
+      class:bg-slate-700={!showSite}
+      class:text-gray-300={!showSite}
+      onclick={() => showSite = !showSite}
+      title="Site & Survey (terrain, GIS layers)"
+      aria-label="Toggle Site Panel"
+    >⛰</button>
   {/if}
 
   <!-- Undo History toggle button -->

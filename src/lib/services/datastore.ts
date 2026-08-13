@@ -1,4 +1,5 @@
-import type { Project } from '$lib/models/types';
+import type { Project, Terrain, TerrainModel } from '$lib/models/types';
+import { roundMm } from '$lib/utils/geo';
 
 export interface DataStore {
   save(project: Project): Promise<void>;
@@ -20,7 +21,29 @@ function getAll(): Record<string, string> {
   }
 }
 
-/** Revive dates and backfill any missing floor array fields on a loaded project. */
+/**
+ * One-time conversion of the legacy sculpted grid heightfield into TIN terrain
+ * points. Legacy projects are not georeferenced, so they get the identity
+ * render origin (0,0,0) — plan geometry keeps its meaning and the user can
+ * re-anchor later. Grids are downsampled to at most ~20k points.
+ */
+function terrainModelFromLegacyGrid(t: Terrain): TerrainModel {
+  const total = t.cols * t.rows;
+  const stride = Math.max(1, Math.ceil(Math.sqrt(total / 20000)));
+  const xyz: number[] = [];
+  for (let r = 0; r < t.rows; r += stride) {
+    for (let c = 0; c < t.cols; c += stride) {
+      const px = t.origin.x + c * t.cellSize; // plan cm
+      const py = t.origin.y + r * t.cellSize;
+      const h = t.heights[r * t.cols + c] ?? 0;
+      // plan cm → S-JTSK m at identity origin (see geo.ts conventions).
+      xyz.push(roundMm(px / 100), roundMm(-py / 100), roundMm(h / 100));
+    }
+  }
+  return { xyz };
+}
+
+/** Revive dates and backfill any missing fields on a loaded project. */
 export function normalizeProject(p: any): Project {
   p.createdAt = new Date(p.createdAt);
   p.updatedAt = new Date(p.updatedAt);
@@ -31,7 +54,17 @@ export function normalizeProject(p: any): Project {
     if (!floor.furniture) floor.furniture = [];
     if (!floor.stairs) floor.stairs = [];
     if (!floor.columns) floor.columns = [];
+    if (!floor.beams) floor.beams = [];
+    if (!floor.slabs) floor.slabs = [];
+    if (!floor.roofs) floor.roofs = [];
   }
+  if (!p.gisLayers) p.gisLayers = [];
+  if (!p.gisFeatures) p.gisFeatures = [];
+  if (!p.site) p.site = { renderOrigin: { x: 0, y: 0, z: 0 } };
+  if (!p.terrainModel && p.terrain?.heights?.length) {
+    p.terrainModel = terrainModelFromLegacyGrid(p.terrain as Terrain);
+  }
+  delete p.terrain; // legacy grid is converted above and no longer written
   return p as Project;
 }
 
@@ -210,6 +243,31 @@ function backend(): Promise<DataStore> {
  * /api/projects routes are available, otherwise transparently falls back to
  * localStorage — so the app keeps working before the DB is provisioned.
  */
+/**
+ * Archive a bulky per-project upload (e.g. the raw RTK point file) in the
+ * assets table. Best-effort: with no server DB the archive is skipped — the
+ * parsed terrain still lives in the project itself.
+ */
+export async function archiveAsset(
+  projectId: string,
+  kind: string,
+  meta: Record<string, unknown>,
+  data: unknown
+): Promise<string | null> {
+  const id = `${kind}_${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    const res = await fetch(`/api/projects/${projectId}/assets`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, kind, meta, data }),
+    });
+    if (!res.ok) return null;
+    return id;
+  } catch {
+    return null;
+  }
+}
+
 export const store: DataStore = {
   async save(project) { return (await backend()).save(project); },
   async load(id) { return (await backend()).load(id); },

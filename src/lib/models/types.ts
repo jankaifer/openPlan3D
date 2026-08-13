@@ -176,6 +176,9 @@ export interface Floor {
   textAnnotations: TextAnnotation[];
   groups: ElementGroup[];
   entourage?: EntourageItem[];
+  beams?: Beam[];
+  slabs?: Slab[];
+  roofs?: Roof[];
   /**
    * Optional per-floor alignment transform, applied when floors are shown
    * stacked in the 3D "all layers" view. Lets a misaligned (e.g. imported)
@@ -212,6 +215,93 @@ export interface Terrain {
   heights: number[];
 }
 
+/**
+ * Georeference / site configuration. All site-level geometry (terrain points,
+ * GIS features) is stored in S-JTSK / Krovak East-North (EPSG:5514) meters with
+ * Bpv elevations. S-JTSK coordinates are large negative numbers, so renderers
+ * and the 2D plan work in "plan space": cm offsets from `renderOrigin`
+ * (plan X = east, plan Y = south so north points up on screen — the conversion
+ * lives in src/lib/utils/geo.ts and nowhere else).
+ */
+export interface SiteConfig {
+  /** S-JTSK meters (x east, y north) + Bpv elevation z of plan origin (0,0). */
+  renderOrigin: { x: number; y: number; z: number };
+  /** Ellipsoidal − orthometric height offset in meters (~44.5 in CZ), for GPS use. */
+  geoidOffset?: number;
+}
+
+/**
+ * Site terrain as exact survey/design points; the surface is their Delaunay
+ * triangulation (TIN). `xyz` holds consecutive [x, y, z] triples in S-JTSK
+ * meters (mm precision). Precision is point density: sculpt tools densify the
+ * edited area to a 25 cm lattice before modifying it.
+ */
+export interface TerrainModel {
+  xyz: number[];
+  /** Optional id of the archived raw RTK upload in the assets table. */
+  sourceAssetId?: string;
+}
+
+export type GisFeatureKind = 'point' | 'line' | 'polygon';
+
+export interface GisLayer {
+  id: string;
+  name: string;
+  color: string;
+  lineStyle?: 'solid' | 'dashed' | 'dotted';
+  visible: boolean;
+  locked?: boolean;
+}
+
+/** Vertex of a GIS feature, S-JTSK meters; z is optional absolute Bpv elevation. */
+export interface GisVertex { x: number; y: number; z?: number; }
+
+export interface GisFeature {
+  id: string;
+  layerId: string;
+  kind: GisFeatureKind;
+  vertices: GisVertex[];
+  /** Depth in cm below the terrain surface (buried pipes/cables); overrides z. */
+  depth?: number;
+  label?: string;
+  props?: Record<string, string>;
+}
+
+/** Horizontal structural member; plan-space cm like walls. */
+export interface Beam {
+  id: string;
+  start: Point;
+  end: Point;
+  width: number;      // section width, cm
+  depth: number;      // section height, cm
+  elevation: number;  // bottom of beam above floor level, cm
+  color: string;
+}
+
+export interface Slab {
+  id: string;
+  outline: Point[];   // plan-space cm polygon
+  thickness: number;  // cm
+  elevation: number;  // top surface above floor level, cm
+  kind?: 'floor' | 'terrace' | 'foundation';
+  color: string;
+}
+
+export type RoofKind = 'gable' | 'hip' | 'shed' | 'flat';
+
+export interface Roof {
+  id: string;
+  outline: Point[];        // plan-space cm footprint (rectangle-ish for gable/hip)
+  kind: RoofKind;
+  pitchDeg: number;
+  /** Ridge direction in degrees (plan-space, 0 = +X); auto = longest edge when unset. */
+  ridgeAzimuthDeg?: number;
+  overhang: number;        // cm beyond outline
+  baseElevation: number;   // eave height above floor level, cm
+  thickness: number;       // cm
+  color: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -221,6 +311,15 @@ export interface Project {
   createdAt: Date;
   updatedAt: Date;
   customEntourage?: CustomEntourageDef[];
-  /** Optional sculpted terrain around the building (site-wide, all stories). */
+  /**
+   * Legacy sculpted grid terrain. Converted to `terrainModel` on load by
+   * normalizeProject and no longer written.
+   */
   terrain?: Terrain;
+  /** Georeference / render-origin configuration for the site. */
+  site?: SiteConfig;
+  /** Site terrain as a TIN of exact points (canonical terrain model). */
+  terrainModel?: TerrainModel;
+  gisLayers?: GisLayer[];
+  gisFeatures?: GisFeature[];
 }
