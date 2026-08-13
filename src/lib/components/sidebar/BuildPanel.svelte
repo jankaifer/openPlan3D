@@ -417,8 +417,7 @@
           </button>
         </div>
 
-        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">Structure</h3>
-        <div class="flex gap-2">
+        <div class="flex gap-2 mt-2">
           {#each [['beam', 'Beam', 'Two clicks: start → end'], ['slab', 'Slab', 'Click outline, dbl-click to finish'], ['roof', 'Roof', 'Click outline, dbl-click to finish']] as [t, label, hint]}
             <button
               class="flex-1 flex flex-col items-center gap-1 px-2 py-2 rounded-lg text-sm transition-colors {activeStructTool === t ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'}"
