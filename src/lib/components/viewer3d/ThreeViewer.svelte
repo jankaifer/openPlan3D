@@ -20,6 +20,7 @@
   import { densify, pointsInRadius, sculpt, type SculptOp } from '$lib/utils/tin';
   import { sjtskFromPlan } from '$lib/utils/geo';
   import { buildTerrainScene, flatTerrainModel, type TerrainScene } from './terrainMesh';
+  import { buildBasemapTexture } from './basemapTexture';
   import { buildGisGroup } from './gisMesh3d';
   import { addStructuralMeshes } from './elementMesh';
   import { setTerrainModel, beginUndoGroup, endUndoGroup, updateFloorTransform } from '$lib/stores/project';
@@ -44,6 +45,10 @@
   // Terrain (sculpted ground) — material/texture created once, mesh rebuilt on demand
   let terrainMat: THREE.MeshStandardMaterial;
   let terrainMesh: THREE.Mesh | null = null;
+  // Satellite/OSM drape (built per terrain bounds, cached across sculpt strokes).
+  let basemapTex: THREE.CanvasTexture | null = null;
+  let basemapMat: THREE.MeshStandardMaterial | null = null;
+  let basemapKey = '';
   // The terrain currently rendered — source of truth for sculpt hit-testing.
   // TIN of exact points in S-JTSK meters + plan-space copy (see terrainMesh.ts).
   let activeScene: TerrainScene | null = null;
@@ -1991,11 +1996,49 @@
     terrainMesh = null;
     activeScene = built;
     if (built) {
-      terrainMesh = new THREE.Mesh(built.geometry, terrainMat);
+      terrainMesh = new THREE.Mesh(built.geometry, basemapDrapeMaterial(built) ?? terrainMat);
       terrainMesh.receiveShadow = true;
       scene.add(terrainMesh);
     }
     buildGisOverlay();
+  }
+
+  /**
+   * Satellite/OSM texture draped over the terrain when the site has a basemap.
+   * Cached by basemap kind + terrain bounds so per-frame sculpt rebuilds reuse
+   * the same texture (bounds rarely change mid-stroke).
+   */
+  function basemapDrapeMaterial(built: TerrainScene): THREE.MeshStandardMaterial | null {
+    const project = get(currentProject);
+    const basemap = project?.site?.basemap;
+    if (!basemap) {
+      basemapKey = '';
+      basemapTex?.dispose(); basemapMat?.dispose();
+      basemapTex = null; basemapMat = null;
+      return null;
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (let i = 0; i < built.plan.length; i += 3) {
+      const x = built.plan[i], y = built.plan[i + 1];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    const key = `${basemap.kind}|${Math.round(minX)},${Math.round(minY)},${Math.round(maxX)},${Math.round(maxY)}`;
+    if (key === basemapKey && basemapMat) return basemapMat;
+    basemapTex?.dispose(); basemapMat?.dispose();
+    basemapTex = buildBasemapTexture(activeSite, minX, minY, maxX, maxY, markSceneDirty);
+    if (!basemapTex) { basemapKey = ''; basemapMat = null; return null; }
+    basemapMat = new THREE.MeshStandardMaterial({
+      map: basemapTex,
+      roughness: 0.95,
+      metalness: 0,
+      flatShading: true
+    });
+    basemapMat.polygonOffset = true;
+    basemapMat.polygonOffsetFactor = 2;
+    basemapMat.polygonOffsetUnits = 2;
+    basemapKey = key;
+    return basemapMat;
   }
 
   // GIS layer overlay (utility lines, survey points, area polygons)

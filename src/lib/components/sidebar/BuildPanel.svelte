@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { selectedTool, placingFurnitureId, placingDoorType, placingWindowType, placingStair, addStair, placingColumn, placingColumnShape, activeFloor, setBackgroundImage, canvasCamX, canvasCamY, placingEntourageId, addCustomEntourage, structTool } from '$lib/stores/project';
+  import { selectedTool, placingFurnitureId, placingDoorType, placingWindowType, placingStair, addStair, placingColumn, placingColumnShape, activeFloor, setBackgroundImage, canvasCamX, canvasCamY, placingEntourageId, addCustomEntourage, structTool, gisTool, activeGisLayerId, selectedGisFeatureId, draftGisFeatureId, addGisLayer, deleteGisFeature } from '$lib/stores/project';
+  import { makeLayer } from '$lib/utils/gis';
   import type { Tool } from '$lib/stores/project';
   import type { Door, Window as Win, CustomEntourageDef } from '$lib/models/types';
   import { entourageCatalog, entourageCategories } from '$lib/utils/entourageCatalog';
@@ -190,6 +191,35 @@
   placingColumn.subscribe(v => { isPlacingColumn = v; });
   let activeStructTool = $state<'beam' | 'slab' | 'roof' | null>(null);
   structTool.subscribe(v => { activeStructTool = v; });
+
+  // Site features (GIS collections of points/lines/areas).
+  let gisCollections = $state<{ id: string; name: string; color: string }[]>([]);
+  currentProject.subscribe(p => { gisCollections = (p?.gisLayers ?? []).map(l => ({ id: l.id, name: l.name, color: l.color })); });
+  let activeCollectionId = $state<string | null>(null);
+  activeGisLayerId.subscribe(v => { activeCollectionId = v; });
+  let activeGisDrawTool = $state<'point' | 'line' | 'polygon' | null>(null);
+  gisTool.subscribe(v => { activeGisDrawTool = v; });
+  let selectedGisId = $state<string | null>(null);
+  selectedGisFeatureId.subscribe(v => { selectedGisId = v; });
+
+  function newCollection() {
+    const name = prompt('Collection name (e.g. Water, Electricity, Fence)');
+    if (!name) return;
+    const layer = makeLayer(name, gisCollections as any);
+    addGisLayer(layer);
+    activeGisLayerId.set(layer.id);
+  }
+
+  function toggleGisTool(t: 'point' | 'line' | 'polygon') {
+    if (activeGisDrawTool === t) {
+      gisTool.set(null);
+      draftGisFeatureId.set(null);
+      return;
+    }
+    if (!activeCollectionId) return; // features always belong to a collection
+    gisTool.set(t);
+    structTool.set(null);
+  }
 
   function onPlaceStair() {
     placingStair.set(true);
@@ -437,6 +467,55 @@
             </button>
           {/each}
         </div>
+
+        <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">Site features</h3>
+        <div class="flex gap-1 items-center mb-1.5">
+          <select
+            class="flex-1 min-w-0 border border-gray-200 rounded-lg px-2 py-1.5 text-xs text-gray-700 bg-white"
+            value={activeCollectionId ?? ''}
+            onchange={(e) => activeGisLayerId.set(e.currentTarget.value || null)}
+          >
+            <option value="">— collection —</option>
+            {#each gisCollections as c (c.id)}
+              <option value={c.id}>{c.name}</option>
+            {/each}
+          </select>
+          <button
+            class="px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 text-xs font-medium"
+            title="New collection"
+            onclick={newCollection}
+          >+ New</button>
+        </div>
+        <div class="flex gap-2">
+          {#each [['point', 'Point', 'Click to place a point'], ['line', 'Line', 'Click vertices, dbl-click to finish'], ['polygon', 'Area', 'Click outline, dbl-click to finish']] as [t, label, hint]}
+            <button
+              class="flex-1 flex flex-col items-center gap-1 px-2 py-2 rounded-lg text-sm transition-colors {activeGisDrawTool === t ? 'bg-blue-50 text-slate-800 ring-1 ring-blue-200' : 'hover:bg-gray-50 text-gray-700'} {!activeCollectionId ? 'opacity-40 cursor-not-allowed' : ''}"
+              title={activeCollectionId ? hint : 'Select or create a collection first'}
+              disabled={!activeCollectionId}
+              onclick={() => toggleGisTool(t as 'point' | 'line' | 'polygon')}
+            >
+              <div class="w-9 h-9 rounded-lg bg-gray-100 flex items-center justify-center {activeGisDrawTool === t ? 'bg-blue-100' : ''}">
+                {#if t === 'point'}
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="9" stroke-dasharray="2 3"/></svg>
+                {:else if t === 'line'}
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 18 10 8l4 6 6-10"/><circle cx="4" cy="18" r="1.5" fill="currentColor"/><circle cx="20" cy="4" r="1.5" fill="currentColor"/></svg>
+                {:else}
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M5 8 12 4l7 5-2 9H7z"/></svg>
+                {/if}
+              </div>
+              <div class="font-medium text-xs">{label}</div>
+            </button>
+          {/each}
+        </div>
+        {#if !activeCollectionId}
+          <div class="text-[11px] text-gray-400 mt-1">Select or create a collection first — every point/line/area belongs to one.</div>
+        {/if}
+        {#if selectedGisId}
+          <button
+            class="w-full mt-1.5 px-2 py-1.5 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 text-xs font-medium"
+            onclick={() => deleteGisFeature(selectedGisId!)}
+          >Delete selected feature</button>
+        {/if}
 
         <h3 class="text-xs font-semibold text-gray-400 uppercase mb-2 mt-3">Annotate</h3>
         <button

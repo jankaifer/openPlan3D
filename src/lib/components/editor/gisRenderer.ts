@@ -172,6 +172,16 @@ export function findGisFeatureAt(
         if (Math.hypot(a.x + s * dx - planX, a.y + s * dy - planY) <= tolerance) return f.id;
       }
     }
+    // Polygons: clicking anywhere inside the fill selects too.
+    if (f.kind === 'polygon' && pts.length >= 3) {
+      let inside = false;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const a = pts[i], b = pts[j];
+        if (a.y > planY !== b.y > planY &&
+            planX < ((b.x - a.x) * (planY - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+      }
+      if (inside) return f.id;
+    }
   }
   return null;
 }

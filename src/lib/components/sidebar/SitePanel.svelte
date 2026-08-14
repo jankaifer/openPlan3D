@@ -49,10 +49,12 @@
     }
   }
 
+  let gisHint = $state<string | null>(null);
   function toolButton(t: 'point' | 'line' | 'polygon') {
     if ($gisTool === t) { gisTool.set(null); draftGisFeatureId.set(null); return; }
-    if (!$activeGisLayerId && layers.length > 0) activeGisLayerId.set(layers[0].id);
-    if (!$activeGisLayerId) { addGisLayer(makeLayer('Layer 1', layers)); }
+    // Every feature belongs to a collection — require one before drawing.
+    if (!$activeGisLayerId) { gisHint = 'Select or create a collection first.'; return; }
+    gisHint = null;
     gisTool.set(t);
   }
 
@@ -217,13 +219,14 @@
       {#if $gisTool}
         <div class="text-xs text-slate-500">Click the plan to add vertices{$gisTool !== 'point' ? '; double-click to finish, Esc to cancel' : ''}.</div>
       {/if}
+      {#if gisHint}<div class="text-xs text-amber-600">{gisHint}</div>{/if}
     </div>
 
-    <!-- Layers -->
+    <!-- Collections -->
     <div class="px-3 py-2 border-b border-slate-100 space-y-1.5">
       <div class="flex items-center justify-between">
-        <div class="font-medium text-slate-600">GIS layers</div>
-        <button class="text-blue-600 hover:underline text-xs" onclick={() => addGisLayer(makeLayer(`Layer ${layers.length + 1}`, layers))}>+ Add</button>
+        <div class="font-medium text-slate-600">Collections</div>
+        <button class="text-blue-600 hover:underline text-xs" onclick={() => { const n = prompt('Collection name (e.g. Water, Electricity, Fence)'); if (n) { const l = makeLayer(n, layers); addGisLayer(l); activeGisLayerId.set(l.id); } }}>+ Add</button>
       </div>
       {#each layers as layer (layer.id)}
         <div class="flex items-center gap-1.5 rounded px-1 py-0.5 {$activeGisLayerId === layer.id ? 'bg-blue-50' : ''}">
@@ -240,7 +243,7 @@
           <button class="text-slate-300 hover:text-red-500" title="Delete layer" onclick={() => { if (confirm(`Delete layer "${layer.name}" and its ${featureCount(layer.id)} features?`)) deleteGisLayer(layer.id); }}>×</button>
         </div>
       {:else}
-        <div class="text-xs text-slate-400">No layers yet. Add one for water, electricity, fences…</div>
+        <div class="text-xs text-slate-400">No collections yet. Add one for water, electricity, fences…</div>
       {/each}
     </div>
 

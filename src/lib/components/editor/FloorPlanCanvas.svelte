@@ -2241,12 +2241,16 @@
       }
       return;
     }
-    // GIS selection: in select mode, a feature under the cursor wins over
-    // nothing (checked before falling through to plan elements below).
+    // GIS selection: in select mode a feature under the cursor wins — stop
+    // here so plan-element selection below cannot override it.
     if (tool === 'select' && projectRef?.site && !currentGisTool) {
       const hit = findGisFeatureAt(projectRef, wp.x, wp.y, 10 / zoom + 6);
-      if (hit) { selectedGisFeatureId.set(hit); }
-      else if (currentGisFeatureId) selectedGisFeatureId.set(null);
+      if (hit) {
+        selectedGisFeatureId.set(hit);
+        selectedElementId.set(null);
+        return;
+      }
+      if (currentGisFeatureId) selectedGisFeatureId.set(null);
     }
     // Structural element selection (beams by axis, slabs/roofs by outline).
     if (tool === 'select' && currentFloor) {
