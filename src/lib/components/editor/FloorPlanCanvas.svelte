@@ -18,6 +18,7 @@
   import { getEntourageDef } from '$lib/utils/entourageCatalog';
   import { gisTool, activeGisLayerId, selectedGisFeatureId, draftGisFeatureId, showContours, contourInterval, addGisFeature, updateGisFeature, deleteGisFeature, structTool, addBeam, addSlab, addRoof } from '$lib/stores/project';
   import { drawContours as _drawContours, drawGisFeatures as _drawGisFeatures, findGisFeatureAt } from './gisRenderer';
+  import { drawBasemap as _drawBasemap } from './basemapRenderer';
   import { makeFeature } from '$lib/utils/gis';
   import { sjtskFromPlan } from '$lib/utils/geo';
   import { pointInPolygon, positionOnWall, findWallAt as _findWallAt, findHandleAt as _findHandleAt, findFurnitureAt as _findFurnitureAt, findColumnAt as _findColumnAt, findStairAt as _findStairAt, findDoorAt as _findDoorAt, findWindowAt as _findWindowAt, findRoomAt as _findRoomAt, hitTestMeasurement as _hitTestMeasurement, hitTestAnnotation as _hitTestAnnotation, hitTestTextAnnotation as _hitTestTextAnnotation, findEntourageAt } from '$lib/utils/hitTesting';
@@ -1211,6 +1212,7 @@
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = '#f8f9fa';
     ctx.fillRect(0, 0, width, height);
+    if (projectRef) _drawBasemap(ctx, { camX, camY, zoom, width, height }, projectRef, scheduleDraw);
     drawGrid();
     if (layerVis.guides) drawGuides();
     drawBackgroundImage();

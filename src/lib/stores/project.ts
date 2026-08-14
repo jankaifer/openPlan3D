@@ -223,6 +223,35 @@ export function setSite(site: SiteConfig) {
   currentProject.set({ ...p });
 }
 
+/**
+ * Move the site origin to a new S-JTSK point, translating existing absolute
+ * site data (terrain points, GIS features) by the same delta so the plan-space
+ * layout is unchanged — i.e. "place this plan at that real-world location".
+ */
+export function relocateSite(newOrigin: { x: number; y: number; z: number }) {
+  const p = get(currentProject);
+  if (!p) return;
+  snapshot('Relocated site');
+  const old = p.site?.renderOrigin ?? { x: 0, y: 0, z: 0 };
+  const dx = newOrigin.x - old.x, dy = newOrigin.y - old.y, dz = newOrigin.z - old.z;
+  if (p.terrainModel) {
+    const xyz = p.terrainModel.xyz;
+    for (let i = 0; i < xyz.length; i += 3) {
+      xyz[i] += dx; xyz[i + 1] += dy; xyz[i + 2] += dz;
+    }
+    p.terrainModel = { ...p.terrainModel, xyz: [...xyz] };
+  }
+  for (const f of p.gisFeatures ?? []) {
+    f.vertices = f.vertices.map((v) => ({
+      ...v, x: v.x + dx, y: v.y + dy,
+      ...(v.z !== undefined ? { z: v.z + dz } : {})
+    }));
+  }
+  p.site = { ...(p.site ?? { renderOrigin: newOrigin }), renderOrigin: newOrigin };
+  p.updatedAt = new Date();
+  currentProject.set({ ...p });
+}
+
 // ── GIS layers/features (site-level: utility lines, survey points, areas) ──
 
 /** Active GIS drawing tool; null = normal plan editing. */

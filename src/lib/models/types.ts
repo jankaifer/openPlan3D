@@ -228,6 +228,8 @@ export interface SiteConfig {
   renderOrigin: { x: number; y: number; z: number };
   /** Ellipsoidal − orthometric height offset in meters (~44.5 in CZ), for GPS use. */
   geoidOffset?: number;
+  /** Background map tiles under the 2D plan (needs a georeferenced origin). */
+  basemap?: { kind: 'satellite' | 'osm'; opacity?: number };
 }
 
 /**

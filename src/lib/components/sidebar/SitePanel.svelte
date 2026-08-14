@@ -1,13 +1,18 @@
 <script lang="ts">
-  import { currentProject, gisTool, activeGisLayerId, selectedGisFeatureId, draftGisFeatureId, showContours, contourInterval, addGisLayer, updateGisLayer, deleteGisLayer, updateGisFeature, deleteGisFeature, applyTerrainImport, setTerrainModel } from '$lib/stores/project';
+  import { currentProject, gisTool, activeGisLayerId, selectedGisFeatureId, draftGisFeatureId, showContours, contourInterval, addGisLayer, updateGisLayer, deleteGisLayer, updateGisFeature, deleteGisFeature, applyTerrainImport, setTerrainModel, setSite, relocateSite } from '$lib/stores/project';
   import { makeLayer } from '$lib/utils/gis';
   import { parseRtkPoints, terrainFromRtk } from '$lib/utils/rtkImport';
   import { archiveAsset } from '$lib/services/datastore';
-  import { sjtskToWgs84 } from '$lib/utils/geo';
+  import { roundMm, sjtskToWgs84, wgs84ToSjtsk } from '$lib/utils/geo';
+  import { terrainSampleGrid, terrainFromElevations } from '$lib/utils/defaultTerrain';
 
   let collapsed = $state(false);
   let importStatus = $state<string | null>(null);
   let fileInput: HTMLInputElement;
+  let address = $state('Jivina 90, 267 62');
+  let locateStatus = $state<string | null>(null);
+  let demStatus = $state<string | null>(null);
+  let demExtent = $state(400);
 
   const project = $derived($currentProject);
   const layers = $derived(project?.gisLayers ?? []);
@@ -54,6 +59,68 @@
   function featureCount(layerId: string) {
     return features.filter((f) => f.layerId === layerId).length;
   }
+
+  const georeferenced = $derived(!!origin && (origin.x !== 0 || origin.y !== 0));
+  const basemap = $derived(project?.site?.basemap ?? null);
+
+  async function fetchElevations(latlon: { lat: number; lon: number }[]): Promise<(number | null)[]> {
+    const res = await fetch('/api/elevation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ locations: latlon })
+    });
+    if (!res.ok) throw new Error(`elevation lookup failed (${res.status})`);
+    return (await res.json()).elevations;
+  }
+
+  async function locate() {
+    if (!project || !address.trim()) return;
+    locateStatus = 'Searching…';
+    try {
+      const res = await fetch(`/api/geocode?q=${encodeURIComponent(address)}`);
+      if (!res.ok) throw new Error(`geocoding failed (${res.status})`);
+      const hits = (await res.json()) as { lat: number; lon: number; displayName: string }[];
+      if (!hits.length) { locateStatus = 'Address not found.'; return; }
+      const hit = hits[0];
+      locateStatus = 'Getting elevation…';
+      const [z] = await fetchElevations([{ lat: hit.lat, lon: hit.lon }]);
+      const s = wgs84ToSjtsk({ lat: hit.lat, lon: hit.lon });
+      relocateSite({ x: roundMm(s.x), y: roundMm(s.y), z: roundMm(z ?? 0) });
+      if (!project.site?.basemap) setBasemap('satellite');
+      locateStatus = `Placed at ${hit.displayName}`;
+    } catch (err: any) {
+      locateStatus = `Failed: ${err?.message ?? err}`;
+    }
+  }
+
+  function setBasemap(kind: 'satellite' | 'osm' | 'none') {
+    if (!project?.site) return;
+    setSite({
+      ...project.site,
+      basemap: kind === 'none' ? undefined : { kind, opacity: basemap?.opacity ?? 1 }
+    });
+  }
+
+  function setBasemapOpacity(opacity: number) {
+    if (!project?.site?.basemap) return;
+    setSite({ ...project.site, basemap: { ...project.site.basemap, opacity } });
+  }
+
+  async function loadDemTerrain() {
+    if (!project?.site || !georeferenced) return;
+    if (terrainPoints > 0 && !confirm(`Replace the existing ${terrainPoints} terrain points with EU-DEM data?`)) return;
+    demStatus = 'Fetching elevations… (a few seconds)';
+    try {
+      const grid = terrainSampleGrid(project.site, demExtent, 25);
+      const elevations = await fetchElevations(grid.latlon);
+      const model = terrainFromElevations(grid, elevations);
+      if (!model) { demStatus = 'No elevation data returned for this area.'; return; }
+      applyTerrainImport(project.site, model);
+      demStatus = `Loaded ${model.xyz.length / 3} points (EU-DEM ~25 m).`;
+    } catch (err: any) {
+      demStatus = `Failed: ${err?.message ?? err}`;
+    }
+  }
 </script>
 
 <div class="w-64 max-md:w-56 h-full bg-white border-l border-slate-200 flex flex-col text-sm overflow-y-auto">
@@ -63,6 +130,35 @@
   </button>
 
   {#if !collapsed}
+    <!-- Location & basemap -->
+    <div class="px-3 py-2 border-b border-slate-100 space-y-2">
+      <div class="font-medium text-slate-600">Location & map</div>
+      <div class="flex gap-1">
+        <input class="flex-1 min-w-0 border border-slate-200 rounded px-1.5 py-1 text-xs" placeholder="Address…"
+          bind:value={address} onkeydown={(e) => { if (e.key === 'Enter') locate(); }} />
+        <button class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 text-xs" onclick={locate}>Locate</button>
+      </div>
+      {#if locateStatus}<div class="text-xs text-slate-500">{locateStatus}</div>{/if}
+      {#if georeferenced}
+        <label class="flex items-center gap-2 text-xs text-slate-600">Basemap
+          <select class="flex-1 border border-slate-200 rounded px-1 py-0.5" value={basemap?.kind ?? 'none'}
+            onchange={(e) => setBasemap(e.currentTarget.value as 'satellite' | 'osm' | 'none')}>
+            <option value="none">None</option>
+            <option value="satellite">Satellite</option>
+            <option value="osm">OpenStreetMap</option>
+          </select>
+        </label>
+        {#if basemap}
+          <label class="flex items-center gap-2 text-xs text-slate-600">Opacity
+            <input type="range" min="0.2" max="1" step="0.1" class="flex-1" value={basemap.opacity ?? 1}
+              onchange={(e) => setBasemapOpacity(Number(e.currentTarget.value))} />
+          </label>
+        {/if}
+      {:else}
+        <div class="text-xs text-slate-400">Locate an address (or import RTK points) to enable the satellite basemap.</div>
+      {/if}
+    </div>
+
     <!-- Terrain -->
     <div class="px-3 py-2 border-b border-slate-100 space-y-2">
       <div class="font-medium text-slate-600">Terrain</div>
@@ -76,6 +172,19 @@
       <button class="w-full px-2 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700" onclick={() => fileInput.click()}>
         Import RTK points…
       </button>
+      {#if georeferenced}
+        <div class="flex gap-1">
+          <button class="flex-1 px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs" onclick={loadDemTerrain}>
+            Load terrain (EU-DEM)
+          </button>
+          <select class="border border-slate-200 rounded px-1 py-0.5 text-xs" bind:value={demExtent} title="Area around origin">
+            <option value={200}>200 m</option>
+            <option value={400}>400 m</option>
+            <option value={800}>800 m</option>
+          </select>
+        </div>
+        {#if demStatus}<div class="text-xs text-slate-500">{demStatus}</div>{/if}
+      {/if}
       {#if terrainPoints > 0}
         <button class="w-full px-2 py-1 rounded border border-slate-200 text-slate-500 hover:bg-slate-50 text-xs" onclick={() => { if (confirm('Remove all terrain points?')) setTerrainModel(undefined); }}>
           Clear terrain
