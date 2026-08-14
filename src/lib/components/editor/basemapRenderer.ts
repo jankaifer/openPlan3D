@@ -1,6 +1,6 @@
 import type { Project } from '$lib/models/types';
 import {
-  TILE_SIZE, basemapAttribution, pickTileZoom, tileUrl, tilesForPlanRect
+  MIN_TILE_Z, TILE_SIZE, basemapAttribution, pickTileZoom, tileUrl, tilesForPlanRect
 } from '$lib/utils/basemap';
 import { sjtskToWgs84 } from '$lib/utils/geo';
 
@@ -56,8 +56,12 @@ export function drawBasemap(
   const maxY = vt.camY + vt.height / 2 / vt.zoom;
 
   const lat = sjtskToWgs84({ x: o.x, y: o.y }).lat;
-  const z = pickTileZoom(lat, vt.zoom, basemap.kind);
-  const tiles = tilesForPlanRect(site, minX, minY, maxX, maxY, z);
+  // Wide views can exceed the per-view tile cap at the resolution-matched
+  // zoom (tilesForPlanRect returns []); fall back to coarser tiles until
+  // the view fits.
+  let z = pickTileZoom(lat, vt.zoom, basemap.kind);
+  let tiles = tilesForPlanRect(site, minX, minY, maxX, maxY, z);
+  while (!tiles.length && z > MIN_TILE_Z) tiles = tilesForPlanRect(site, minX, minY, maxX, maxY, --z);
 
   ctx.save();
   ctx.globalAlpha = basemap.opacity ?? 1;

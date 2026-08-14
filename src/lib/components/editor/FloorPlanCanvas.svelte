@@ -38,7 +38,7 @@
   function markDirty() { canvasDirty = true; }
   function getCS(): CanvasState { return { ctx, width, height, zoom, camX, camY }; }
   // Sync zoom with shared store
-  canvasZoom.subscribe(v => { zoom = v; });
+  canvasZoom.subscribe(v => { if (v !== zoom) { zoom = v; markDirty(); } });
   $effect(() => { canvasZoom.set(zoom); });
   $effect(() => { canvasCamX.set(camX); });
   $effect(() => { canvasCamY.set(camY); });

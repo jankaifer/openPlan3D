@@ -50,6 +50,18 @@
   }
 
   let gisHint = $state<string | null>(null);
+  let newCollectionOpen = $state(false);
+  let newCollectionName = $state('');
+  function createCollection() {
+    const name = newCollectionName.trim();
+    if (!name) return;
+    const l = makeLayer(name, layers);
+    addGisLayer(l);
+    activeGisLayerId.set(l.id);
+    newCollectionName = '';
+    newCollectionOpen = false;
+    gisHint = null;
+  }
   function toolButton(t: 'point' | 'line' | 'polygon') {
     if ($gisTool === t) { gisTool.set(null); draftGisFeatureId.set(null); return; }
     // Every feature belongs to a collection — require one before drawing.
@@ -226,8 +238,22 @@
     <div class="px-3 py-2 border-b border-slate-100 space-y-1.5">
       <div class="flex items-center justify-between">
         <div class="font-medium text-slate-600">Collections</div>
-        <button class="text-blue-600 hover:underline text-xs" onclick={() => { const n = prompt('Collection name (e.g. Water, Electricity, Fence)'); if (n) { const l = makeLayer(n, layers); addGisLayer(l); activeGisLayerId.set(l.id); } }}>+ Add</button>
+        <button class="text-blue-600 hover:underline text-xs" onclick={() => { newCollectionOpen = !newCollectionOpen; }}>+ Add</button>
       </div>
+      {#if newCollectionOpen}
+        <div class="flex gap-1">
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            class="flex-1 min-w-0 border border-blue-300 rounded px-1.5 py-1 text-xs"
+            placeholder="Name (e.g. Water, Fence)"
+            autofocus
+            bind:value={newCollectionName}
+            onkeydown={(e) => { if (e.key === 'Enter') createCollection(); if (e.key === 'Escape') { newCollectionOpen = false; newCollectionName = ''; } }}
+          />
+          <button class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 text-xs disabled:opacity-40"
+            disabled={!newCollectionName.trim()} onclick={createCollection}>Create</button>
+        </div>
+      {/if}
       {#each layers as layer (layer.id)}
         <div class="flex items-center gap-1.5 rounded px-1 py-0.5 {$activeGisLayerId === layer.id ? 'bg-blue-50' : ''}">
           <input type="checkbox" checked={layer.visible} title="Visible" onchange={(e) => updateGisLayer(layer.id, { visible: e.currentTarget.checked })} />

@@ -202,12 +202,17 @@
   let selectedGisId = $state<string | null>(null);
   selectedGisFeatureId.subscribe(v => { selectedGisId = v; });
 
-  function newCollection() {
-    const name = prompt('Collection name (e.g. Water, Electricity, Fence)');
+  let newCollectionOpen = $state(false);
+  let newCollectionName = $state('');
+
+  function createCollection() {
+    const name = newCollectionName.trim();
     if (!name) return;
     const layer = makeLayer(name, gisCollections as any);
     addGisLayer(layer);
     activeGisLayerId.set(layer.id);
+    newCollectionName = '';
+    newCollectionOpen = false;
   }
 
   function toggleGisTool(t: 'point' | 'line' | 'polygon') {
@@ -483,9 +488,26 @@
           <button
             class="px-2.5 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 text-xs font-medium"
             title="New collection"
-            onclick={newCollection}
+            onclick={() => { newCollectionOpen = !newCollectionOpen; }}
           >+ New</button>
         </div>
+        {#if newCollectionOpen}
+          <div class="flex gap-1 mb-1.5">
+            <!-- svelte-ignore a11y_autofocus -->
+            <input
+              class="flex-1 min-w-0 border border-blue-300 rounded-lg px-2 py-1.5 text-xs"
+              placeholder="Name (e.g. Water, Fence)"
+              autofocus
+              bind:value={newCollectionName}
+              onkeydown={(e) => { if (e.key === 'Enter') createCollection(); if (e.key === 'Escape') { newCollectionOpen = false; newCollectionName = ''; } }}
+            />
+            <button
+              class="px-2.5 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-xs font-medium disabled:opacity-40"
+              disabled={!newCollectionName.trim()}
+              onclick={createCollection}
+            >Create</button>
+          </div>
+        {/if}
         <div class="flex gap-2">
           {#each [['point', 'Point', 'Click to place a point'], ['line', 'Line', 'Click vertices, dbl-click to finish'], ['polygon', 'Area', 'Click outline, dbl-click to finish']] as [t, label, hint]}
             <button
