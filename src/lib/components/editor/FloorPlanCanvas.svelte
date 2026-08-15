@@ -35,10 +35,22 @@
 
   // Dirty flag for render optimization — only redraw when something changes
   let canvasDirty = true;
-  function markDirty() { canvasDirty = true; }
+  // Mark the canvas for redraw and flush it in a microtask — rendering keeps
+  // up with state changes even when rAF/timers are throttled (hidden tabs,
+  // headless). The rAF pump still coalesces continuous interactions.
+  let redrawQueued = false;
+  function markDirty() {
+    canvasDirty = true;
+    if (redrawQueued) return;
+    redrawQueued = true;
+    queueMicrotask(() => { redrawQueued = false; draw(); });
+  }
   function getCS(): CanvasState { return { ctx, width, height, zoom, camX, camY }; }
   // Sync zoom with shared store
-  canvasZoom.subscribe(v => { if (v !== zoom) { zoom = v; markDirty(); } });
+  canvasZoom.subscribe(v => { if (v !== zoom) zoom = v; });
+  // Any camera change (zoom buttons, wheel, pan, store sync) triggers a redraw
+  // — every zoom/pan path assigns these, so none can leave a stale frame.
+  $effect(() => { void zoom; void camX; void camY; markDirty(); });
   $effect(() => { canvasZoom.set(zoom); });
   $effect(() => { canvasCamX.set(camX); });
   $effect(() => { canvasCamY.set(camY); });
@@ -1121,7 +1133,6 @@
 
   function scheduleDraw() {
     markDirty();
-    requestAnimationFrame(draw);
   }
 
   /** Hit-test beams (axis distance) and slab/roof outlines. */
@@ -1207,7 +1218,7 @@
 
   function draw() {
     if (!ctx) return;
-    if (!canvasDirty) { requestAnimationFrame(draw); return; }
+    if (!canvasDirty) return;
     canvasDirty = false;
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = '#f8f9fa';
@@ -1225,7 +1236,7 @@
     }
 
     const floor = currentFloor;
-    if (!floor) { requestAnimationFrame(draw); return; }
+    if (!floor) return;
     // Mark dirty whenever active interactions are happening (wall drawing, dragging, etc.)
     if (wallStart || draggingFurnitureId || draggingDoorId || draggingWindowId || draggingStairId ||
         draggingColumnId || draggingWallEndpoint || draggingWallParallel || draggingCurveHandle ||
@@ -1860,8 +1871,6 @@
 
     // Mini-map
     drawMinimap();
-
-    requestAnimationFrame(draw);
   }
 
   /** True while the integrated elevation view covers the canvas area */
@@ -1876,7 +1885,12 @@
     setTextureLoadCallback(() => { /* draw loop is already running via rAF */ });
     const resizeObs = new ResizeObserver(resize);
     resizeObs.observe(canvas.parentElement!);
-    requestAnimationFrame(draw);
+    // Single render pump: rAF-driven when frames flow, with a timer fallback
+    // so redraws still happen when rAF is throttled (hidden tab, headless).
+    let disposed = false;
+    const pump = () => { if (disposed) return; draw(); requestAnimationFrame(pump); };
+    requestAnimationFrame(pump);
+    const drawWatchdog = setInterval(() => { if (canvasDirty) draw(); }, 100);
 
     let initialFitDone = false;
     const unsub1 = activeFloor.subscribe((f) => {
@@ -1963,7 +1977,7 @@
     canvas.addEventListener('touchend', onTouchEnd, { passive: false });
     canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
-    return () => { resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub_elevopen(); unsub_elevpick(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); unsub_gis1(); unsub_gis2(); unsub_gis3(); unsub_gis4(); unsub_gis5(); unsub_struct(); document.removeEventListener('paste', handlePaste); canvas.removeEventListener('touchstart', onTouchStart); canvas.removeEventListener('touchmove', onTouchMove); canvas.removeEventListener('touchend', onTouchEnd); canvas.removeEventListener('touchcancel', onTouchEnd); };
+    return () => { disposed = true; clearInterval(drawWatchdog); resizeObs.disconnect(); unsub1(); unsub2(); unsub3(); unsub4(); unsub5(); unsub6(); unsub7(); unsub8(); unsub9(); unsub10(); unsub11(); unsub12(); unsub13(); unsub_multi(); unsub_elevopen(); unsub_elevpick(); unsub14(); unsub_col(); unsub_cols(); unsub_layers(); unsub_snapgrid(); unsubEnt1(); unsubEnt2(); unsub_gis1(); unsub_gis2(); unsub_gis3(); unsub_gis4(); unsub_gis5(); unsub_struct(); document.removeEventListener('paste', handlePaste); canvas.removeEventListener('touchstart', onTouchStart); canvas.removeEventListener('touchmove', onTouchMove); canvas.removeEventListener('touchend', onTouchEnd); canvas.removeEventListener('touchcancel', onTouchEnd); };
   });
 
   /** Compute world bounding box of all elements */
