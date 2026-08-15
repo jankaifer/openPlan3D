@@ -1,5 +1,6 @@
 import { writable, derived, get } from 'svelte/store';
 import type { Project, Floor, Wall, Door, Window as Win, FurnitureItem, Point, Stair, Column, BackgroundImage, GuideLine, ElementGroup, EntourageItem, SiteConfig, TerrainModel, GisLayer, GisFeature, Beam, Slab, Roof } from '$lib/models/types';
+import { jivinaSite, jivinaTerrainModel } from '$lib/data/jivinaSite';
 
 
 function uid(): string {
@@ -18,6 +19,8 @@ export function createDefaultProject(name = 'Untitled Project'): Project {
     name,
     floors: [floor],
     activeFloorId: floor.id,
+    site: jivinaSite(),
+    terrainModel: jivinaTerrainModel(),
     createdAt: new Date(),
     updatedAt: new Date(),
   };
