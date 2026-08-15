@@ -1,5 +1,5 @@
-import type { Project, Terrain, TerrainModel } from '$lib/models/types';
-import { roundMm } from '$lib/utils/geo';
+import type { Project } from '$lib/models/types';
+import { jivinaSite, jivinaTerrainModel } from '$lib/data/jivinaSite';
 
 export interface DataStore {
   save(project: Project): Promise<void>;
@@ -21,28 +21,6 @@ function getAll(): Record<string, string> {
   }
 }
 
-/**
- * One-time conversion of the legacy sculpted grid heightfield into TIN terrain
- * points. Legacy projects are not georeferenced, so they get the identity
- * render origin (0,0,0) — plan geometry keeps its meaning and the user can
- * re-anchor later. Grids are downsampled to at most ~20k points.
- */
-function terrainModelFromLegacyGrid(t: Terrain): TerrainModel {
-  const total = t.cols * t.rows;
-  const stride = Math.max(1, Math.ceil(Math.sqrt(total / 20000)));
-  const xyz: number[] = [];
-  for (let r = 0; r < t.rows; r += stride) {
-    for (let c = 0; c < t.cols; c += stride) {
-      const px = t.origin.x + c * t.cellSize; // plan cm
-      const py = t.origin.y + r * t.cellSize;
-      const h = t.heights[r * t.cols + c] ?? 0;
-      // plan cm → S-JTSK m at identity origin (see geo.ts conventions).
-      xyz.push(roundMm(px / 100), roundMm(-py / 100), roundMm(h / 100));
-    }
-  }
-  return { xyz };
-}
-
 /** Revive dates and backfill any missing fields on a loaded project. */
 export function normalizeProject(p: any): Project {
   p.createdAt = new Date(p.createdAt);
@@ -60,11 +38,16 @@ export function normalizeProject(p: any): Project {
   }
   if (!p.gisLayers) p.gisLayers = [];
   if (!p.gisFeatures) p.gisFeatures = [];
-  if (!p.site) p.site = { renderOrigin: { x: 0, y: 0, z: 0 } };
-  if (!p.terrainModel && p.terrain?.heights?.length) {
-    p.terrainModel = terrainModelFromLegacyGrid(p.terrain as Terrain);
+  delete p.terrain; // legacy sculpted-grid heightfield, superseded below
+  // Single-site app: every project lives at Jivina 90. Projects saved before
+  // georeferencing existed carry the identity origin (0,0,0) — their terrain
+  // coordinates are meaningless for the real site, so both get replaced with
+  // the hard-coded site data (walls/floors are origin-relative and unaffected).
+  const o = p.site?.renderOrigin;
+  if (!o || (o.x === 0 && o.y === 0)) {
+    p.site = jivinaSite();
+    p.terrainModel = jivinaTerrainModel();
   }
-  delete p.terrain; // legacy grid is converted above and no longer written
   return p as Project;
 }
 

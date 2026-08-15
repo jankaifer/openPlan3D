@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeProject } from './datastore';
+import { JIVINA_90_ORIGIN, jivinaTerrainModel } from '$lib/data/jivinaSite';
 
 function legacyProject(extra: any = {}) {
   return {
@@ -17,12 +18,12 @@ describe('normalizeProject', () => {
     expect(p.floors[0].roofs).toEqual([]);
     expect(p.gisLayers).toEqual([]);
     expect(p.gisFeatures).toEqual([]);
-    expect(p.site).toEqual({ renderOrigin: { x: 0, y: 0, z: 0 } });
     expect(p.createdAt).toBeInstanceOf(Date);
   });
 
-  it('converts a legacy grid terrain into TIN points at the identity origin', () => {
-    // 3×3 grid, 100 cm cells at plan (0,0), heights in cm.
+  it('anchors un-georeferenced projects at Jivina 90 with the built-in terrain', () => {
+    // Legacy grid terrain at identity origin gets replaced wholesale — its
+    // coordinates are meaningless for the real site.
     const p = normalizeProject(
       legacyProject({
         terrain: {
@@ -32,19 +33,9 @@ describe('normalizeProject', () => {
       })
     );
     expect(p.terrain).toBeUndefined();
-    expect(p.terrainModel!.xyz).toHaveLength(27);
-    // Node (col 1, row 2): plan (100, 200) cm, h 70 cm → S-JTSK m (1, -2, 0.7)
-    expect(p.terrainModel!.xyz.slice(21, 24)).toEqual([1, -2, 0.7]);
-  });
-
-  it('downsamples huge legacy grids to ~20k points', () => {
-    const cols = 300, rows = 300;
-    const p = normalizeProject(
-      legacyProject({
-        terrain: { origin: { x: 0, y: 0 }, cellSize: 25, cols, rows, heights: new Array(cols * rows).fill(1) }
-      })
-    );
-    expect(p.terrainModel!.xyz.length / 3).toBeLessThanOrEqual(25000);
+    expect(p.site!.renderOrigin).toEqual(JIVINA_90_ORIGIN);
+    expect(p.site!.basemap?.kind).toBe('satellite');
+    expect(p.terrainModel).toEqual(jivinaTerrainModel());
   });
 
   it('leaves an existing terrainModel and site alone', () => {

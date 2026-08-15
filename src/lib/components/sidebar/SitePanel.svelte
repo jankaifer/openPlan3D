@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { currentProject, gisTool, activeGisLayerId, selectedGisFeatureId, draftGisFeatureId, showContours, contourInterval, addGisLayer, updateGisLayer, deleteGisLayer, updateGisFeature, deleteGisFeature, applyTerrainImport, setTerrainModel, setSite, relocateSite } from '$lib/stores/project';
+  import { currentProject, gisTool, activeGisLayerId, selectedGisFeatureId, draftGisFeatureId, showContours, contourInterval, addGisLayer, updateGisLayer, deleteGisLayer, updateGisFeature, deleteGisFeature, applyTerrainImport, setTerrainModel, setSite } from '$lib/stores/project';
   import { makeLayer } from '$lib/utils/gis';
   import { parseRtkPoints, terrainFromRtk } from '$lib/utils/rtkImport';
   import { archiveAsset } from '$lib/services/datastore';
   import { sjtskToWgs84 } from '$lib/utils/geo';
-  import { JIVINA_90_ORIGIN, jivinaTerrainModel } from '$lib/data/jivinaSite';
+  import { jivinaTerrainModel } from '$lib/data/jivinaSite';
 
   let collapsed = $state(false);
   let importStatus = $state<string | null>(null);
@@ -71,15 +71,8 @@
     return features.filter((f) => f.layerId === layerId).length;
   }
 
-  const georeferenced = $derived(!!origin && (origin.x !== 0 || origin.y !== 0));
   const basemap = $derived(project?.site?.basemap ?? null);
 
-  /** Georeference the project at the hard-coded Jivina 90 origin. */
-  function placeAtJivina() {
-    if (!project) return;
-    relocateSite({ ...JIVINA_90_ORIGIN });
-    if (!project.site?.basemap) setBasemap('satellite');
-  }
 
   function setBasemap(kind: 'satellite' | 'osm' | 'none') {
     if (!project?.site) return;
@@ -95,7 +88,7 @@
   }
 
   function loadDemTerrain() {
-    if (!project?.site || !georeferenced) return;
+    if (!project?.site) return;
     if (terrainPoints > 0 && !confirm(`Replace the existing ${terrainPoints} terrain points with the built-in EU-DEM data?`)) return;
     const model = jivinaTerrainModel();
     applyTerrainImport(project.site, model);
@@ -113,25 +106,19 @@
     <!-- Location & basemap -->
     <div class="px-3 py-2 border-b border-slate-100 space-y-2">
       <div class="font-medium text-slate-600">Location & map</div>
-      {#if georeferenced}
-        <label class="flex items-center gap-2 text-xs text-slate-600">Basemap
-          <select class="flex-1 border border-slate-200 rounded px-1 py-0.5" value={basemap?.kind ?? 'none'}
-            onchange={(e) => setBasemap(e.currentTarget.value as 'satellite' | 'osm' | 'none')}>
-            <option value="none">None</option>
-            <option value="satellite">Satellite</option>
-            <option value="osm">OpenStreetMap</option>
-          </select>
+      <label class="flex items-center gap-2 text-xs text-slate-600">Basemap
+        <select class="flex-1 border border-slate-200 rounded px-1 py-0.5" value={basemap?.kind ?? 'none'}
+          onchange={(e) => setBasemap(e.currentTarget.value as 'satellite' | 'osm' | 'none')}>
+          <option value="none">None</option>
+          <option value="satellite">Satellite</option>
+          <option value="osm">OpenStreetMap</option>
+        </select>
+      </label>
+      {#if basemap}
+        <label class="flex items-center gap-2 text-xs text-slate-600">Opacity
+          <input type="range" min="0.2" max="1" step="0.1" class="flex-1" value={basemap.opacity ?? 1}
+            onchange={(e) => setBasemapOpacity(Number(e.currentTarget.value))} />
         </label>
-        {#if basemap}
-          <label class="flex items-center gap-2 text-xs text-slate-600">Opacity
-            <input type="range" min="0.2" max="1" step="0.1" class="flex-1" value={basemap.opacity ?? 1}
-              onchange={(e) => setBasemapOpacity(Number(e.currentTarget.value))} />
-          </label>
-        {/if}
-      {:else}
-        <button class="w-full px-2 py-1.5 rounded bg-blue-600 text-white hover:bg-blue-700 text-xs" onclick={placeAtJivina}>
-          Place at Jivina 90
-        </button>
       {/if}
     </div>
 
@@ -148,12 +135,10 @@
       <button class="w-full px-2 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700" onclick={() => fileInput.click()}>
         Import RTK points…
       </button>
-      {#if georeferenced}
-        <button class="w-full px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs" onclick={loadDemTerrain} title="Covers the whole property rectangle">
-          Load terrain (EU-DEM, whole property)
-        </button>
-        {#if demStatus}<div class="text-xs text-slate-500">{demStatus}</div>{/if}
-      {/if}
+      <button class="w-full px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs" onclick={loadDemTerrain} title="Covers the whole property rectangle">
+        Load terrain (EU-DEM, whole property)
+      </button>
+      {#if demStatus}<div class="text-xs text-slate-500">{demStatus}</div>{/if}
       {#if terrainPoints > 0}
         <button class="w-full px-2 py-1 rounded border border-slate-200 text-slate-500 hover:bg-slate-50 text-xs" onclick={() => { if (confirm('Remove all terrain points?')) setTerrainModel(undefined); }}>
           Clear terrain
