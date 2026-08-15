@@ -760,7 +760,10 @@
     terrainCursorGroup = new THREE.Group();
     scene.add(terrainCursorGroup);
 
-    camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 1, 20000);
+    // Far plane must exceed controls.maxDistance plus the world diagonal so the
+    // terrain/basemap never clips out when fully zoomed out (was 20000 = 200 m,
+    // which cut the world off and left only the sky gradient).
+    camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 1, 250000);
     camera.position.set(800, 600, 800);
 
     renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
@@ -781,6 +784,10 @@
     controls.zoomSpeed = 1.5;
     controls.keyPanSpeed = 14;
     controls.target.set(0, 100, 0);
+    // Keep zoom-out inside the far plane (with headroom for the world diagonal)
+    // so the scene never clips away no matter how far the user zooms.
+    controls.minDistance = 50;
+    controls.maxDistance = 120000;
     controls.maxPolarAngle = Math.PI / 2.05;
     // Mark dirty when orbit controls move the camera
     controls.addEventListener('change', markSceneDirty);
