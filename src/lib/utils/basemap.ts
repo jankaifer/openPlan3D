@@ -90,6 +90,29 @@ function planFromTile(site: SiteConfig, tx: number, ty: number, z: number): { x:
 }
 
 /**
+ * Fixed camera-independent basemap coverage around the site origin: a coarse
+ * wide-area level with progressively finer levels near the site. Computed
+ * once per site/kind (the renderer caches it) and drawn for every view, so
+ * zooming or panning the camera never changes what map exists — only which
+ * part of it is on screen.
+ */
+export const BASEMAP_PYRAMID: { z: number; halfExtentM: number }[] = [
+  { z: 12, halfExtentM: 15000 },
+  { z: 14, halfExtentM: 4000 },
+  { z: 16, halfExtentM: 1200 },
+  { z: 18, halfExtentM: 300 }
+];
+
+export function fixedBasemapTiles(site: SiteConfig): TilePlacement[] {
+  const tiles: TilePlacement[] = [];
+  for (const { z, halfExtentM } of BASEMAP_PYRAMID) {
+    const h = halfExtentM * 100; // plan cm
+    tiles.push(...tilesForPlanRect(site, -h, -h, h, h, z));
+  }
+  return tiles;
+}
+
+/**
  * Tiles covering a plan-space rectangle (cm). Returns [] when the site is not
  * georeferenced (identity origin) or the request would exceed the tile cap.
  */
