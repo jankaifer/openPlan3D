@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { SiteConfig, TerrainModel } from '$lib/models/types';
 import { planFromSjtsk } from '$lib/utils/geo';
+import { siteClipSjtskRect } from '$lib/utils/siteClip';
 import { buildTin, type Tin } from '$lib/utils/tin';
 
 /**
@@ -17,10 +18,30 @@ export interface TerrainScene {
   geometry: THREE.BufferGeometry;
 }
 
-/** Default flat starter lattice: 40 m plot at 1 m spacing around the origin. */
+/**
+ * Default flat starter lattice. Georeferenced sites get a flat plot spanning
+ * the whole property clip rectangle (so the basemap drape covers it);
+ * un-georeferenced ones keep the generic 40 m plot around the origin.
+ */
 export function flatTerrainModel(site: SiteConfig): TerrainModel {
   const o = site.renderOrigin;
   const xyz: number[] = [];
+  if (o.x !== 0 || o.y !== 0) {
+    const r = siteClipSjtskRect();
+    const step = 25;
+    const cols = Math.ceil((r.maxX - r.minX) / step) + 1;
+    const rows = Math.ceil((r.maxY - r.minY) / step) + 1;
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        xyz.push(
+          Math.min(r.minX + col * step, r.maxX),
+          Math.min(r.minY + row * step, r.maxY),
+          o.z
+        );
+      }
+    }
+    return { xyz };
+  }
   for (let i = -20; i <= 20; i++)
     for (let j = -20; j <= 20; j++) xyz.push(o.x + i, o.y + j, o.z);
   return { xyz };

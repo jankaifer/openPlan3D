@@ -1,5 +1,6 @@
 import type { SiteConfig } from '$lib/models/types';
 import { planFromSjtsk, sjtskFromPlan, sjtskToWgs84, wgs84ToSjtsk } from './geo';
+import { siteClipPlanRect } from './siteClip';
 
 /**
  * Web-mercator (XYZ) tile math for background basemaps, in pure data terms:
@@ -90,24 +91,23 @@ function planFromTile(site: SiteConfig, tx: number, ty: number, z: number): { x:
 }
 
 /**
- * Fixed camera-independent basemap coverage around the site origin: a coarse
- * wide-area level with progressively finer levels near the site. Computed
+ * Fixed camera-independent basemap coverage: the site clip rectangle (Jan's
+ * property markers, see siteClip.ts) at a few zoom levels — coarse ones as
+ * cheap fallback while z18 tiles stream in, z18 for full detail. Computed
  * once per site/kind (the renderer caches it) and drawn for every view, so
  * zooming or panning the camera never changes what map exists — only which
- * part of it is on screen.
+ * part of it is on screen. No map exists outside the clip rectangle.
  */
-export const BASEMAP_PYRAMID: { z: number; halfExtentM: number }[] = [
-  { z: 12, halfExtentM: 15000 },
-  { z: 14, halfExtentM: 4000 },
-  { z: 16, halfExtentM: 1200 },
-  { z: 18, halfExtentM: 300 }
-];
+export const BASEMAP_ZOOM_LEVELS = [14, 16, 18];
+/** z18 over the full ~740×780 m clip rect needs ~80 tiles. */
+const CLIP_RECT_TILE_CAP = 160;
 
 export function fixedBasemapTiles(site: SiteConfig): TilePlacement[] {
+  const clip = siteClipPlanRect(site);
+  if (!clip) return [];
   const tiles: TilePlacement[] = [];
-  for (const { z, halfExtentM } of BASEMAP_PYRAMID) {
-    const h = halfExtentM * 100; // plan cm
-    tiles.push(...tilesForPlanRect(site, -h, -h, h, h, z));
+  for (const z of BASEMAP_ZOOM_LEVELS) {
+    tiles.push(...tilesForPlanRect(site, clip.minX, clip.minY, clip.maxX, clip.maxY, z, CLIP_RECT_TILE_CAP));
   }
   return tiles;
 }
@@ -122,7 +122,8 @@ export function tilesForPlanRect(
   minY: number,
   maxX: number,
   maxY: number,
-  z: number
+  z: number,
+  tileCap: number = MAX_TILES_PER_VIEW
 ): TilePlacement[] {
   const o = site.renderOrigin;
   if (o.x === 0 && o.y === 0) return [];
@@ -140,7 +141,7 @@ export function tilesForPlanRect(
   const b = lonLatToTileFrac(Math.max(...lons), Math.min(...lats), z);
   const x0 = Math.floor(a.x), x1 = Math.floor(b.x);
   const y0 = Math.floor(a.y), y1 = Math.floor(b.y);
-  if ((x1 - x0 + 1) * (y1 - y0 + 1) > MAX_TILES_PER_VIEW) return [];
+  if ((x1 - x0 + 1) * (y1 - y0 + 1) > tileCap) return [];
   const n = 2 ** z;
   const tiles: TilePlacement[] = [];
   for (let ty = Math.max(0, y0); ty <= Math.min(n - 1, y1); ty++) {

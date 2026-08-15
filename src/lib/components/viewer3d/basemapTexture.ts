@@ -4,6 +4,7 @@ import {
   MIN_TILE_Z, TILE_SIZE, groundResolution, maxTileZoom, tileUrl, tilesForPlanRect
 } from '$lib/utils/basemap';
 import { sjtskToWgs84 } from '$lib/utils/geo';
+import { siteClipPlanRect } from '$lib/utils/siteClip';
 
 /**
  * Render adapter: composite basemap tiles covering a plan-space rectangle
@@ -47,6 +48,17 @@ export function buildBasemapTexture(
   const ctx = canvas.getContext('2d')!;
   ctx.fillStyle = '#9aa39a';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Imagery only inside the site clip rectangle; terrain outside it keeps the
+  // neutral fill. The clip persists on the context, so tiles streaming in via
+  // load callbacks are clipped too.
+  const clip = siteClipPlanRect(site);
+  if (!clip) return null;
+  ctx.beginPath();
+  ctx.rect(
+    (clip.minX - minX) * scale, (clip.minY - minY) * scale,
+    (clip.maxX - clip.minX) * scale, (clip.maxY - clip.minY) * scale
+  );
+  ctx.clip();
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.flipY = false; // canvas row 0 = minY (north edge); v = (y - minY) / h

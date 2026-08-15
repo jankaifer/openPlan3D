@@ -12,7 +12,6 @@
   let address = $state('Jivina 90, 267 62');
   let locateStatus = $state<string | null>(null);
   let demStatus = $state<string | null>(null);
-  let demExtent = $state(400);
 
   const project = $derived($currentProject);
   const layers = $derived(project?.gisLayers ?? []);
@@ -125,7 +124,7 @@
     if (terrainPoints > 0 && !confirm(`Replace the existing ${terrainPoints} terrain points with EU-DEM data?`)) return;
     demStatus = 'Fetching elevations… (a few seconds)';
     try {
-      const grid = terrainSampleGrid(project.site, demExtent, 25);
+      const grid = terrainSampleGrid(project.site, 25);
       const elevations = await fetchElevations(grid.latlon);
       const model = terrainFromElevations(grid, elevations);
       if (!model) { demStatus = 'No elevation data returned for this area.'; return; }
@@ -187,16 +186,9 @@
         Import RTK points…
       </button>
       {#if georeferenced}
-        <div class="flex gap-1">
-          <button class="flex-1 px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs" onclick={loadDemTerrain}>
-            Load terrain (EU-DEM)
-          </button>
-          <select class="border border-slate-200 rounded px-1 py-0.5 text-xs" bind:value={demExtent} title="Area around origin">
-            <option value={200}>200 m</option>
-            <option value={400}>400 m</option>
-            <option value={800}>800 m</option>
-          </select>
-        </div>
+        <button class="w-full px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 text-xs" onclick={loadDemTerrain} title="Covers the whole property rectangle">
+          Load terrain (EU-DEM, whole property)
+        </button>
         {#if demStatus}<div class="text-xs text-slate-500">{demStatus}</div>{/if}
       {/if}
       {#if terrainPoints > 0}

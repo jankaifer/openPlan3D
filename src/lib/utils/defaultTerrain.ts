@@ -1,5 +1,6 @@
 import type { SiteConfig, TerrainModel } from '$lib/models/types';
 import { roundMm, sjtskToWgs84 } from './geo';
+import { siteClipSjtskRect } from './siteClip';
 
 /**
  * Default terrain seeding from a public DEM (EU-DEM ~25 m): build a sample
@@ -14,15 +15,23 @@ export interface SampleGrid {
   latlon: { lat: number; lon: number }[];
 }
 
-/** Square grid of sample points centered on the site origin. */
-export function terrainSampleGrid(site: SiteConfig, extentM = 300, stepM = 25): SampleGrid {
-  const o = site.renderOrigin;
-  const half = extentM / 2;
+/**
+ * Grid of sample points covering the site clip rectangle (the property area —
+ * see siteClip.ts). The former extent-around-origin parameter is gone: the
+ * terrain always spans exactly the clipped map area.
+ */
+export function terrainSampleGrid(_site: SiteConfig, stepM = 25): SampleGrid {
+  const r = siteClipSjtskRect();
+  const cols = Math.ceil((r.maxX - r.minX) / stepM) + 1;
+  const rows = Math.ceil((r.maxY - r.minY) / stepM) + 1;
   const sjtsk: { x: number; y: number }[] = [];
   const latlon: { lat: number; lon: number }[] = [];
-  for (let dy = -half; dy <= half; dy += stepM) {
-    for (let dx = -half; dx <= half; dx += stepM) {
-      const p = { x: o.x + dx, y: o.y + dy };
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const p = {
+        x: Math.min(r.minX + col * stepM, r.maxX),
+        y: Math.min(r.minY + row * stepM, r.maxY)
+      };
       sjtsk.push(p);
       latlon.push(sjtskToWgs84(p));
     }

@@ -2,6 +2,7 @@ import type { Project } from '$lib/models/types';
 import {
   TILE_SIZE, basemapAttribution, fixedBasemapTiles, tileUrl, type TilePlacement
 } from '$lib/utils/basemap';
+import { siteClipPlanRect } from '$lib/utils/siteClip';
 
 /**
  * Canvas adapter: draws web-mercator basemap tiles under the plan. All tile
@@ -62,6 +63,16 @@ export function drawBasemap(
 
   ctx.save();
   ctx.globalAlpha = basemap.opacity ?? 1;
+  // Hard-clip drawing to the site rectangle — tiles are whole squares and
+  // overhang it, but no imagery should show outside the property area.
+  const clip = siteClipPlanRect(site);
+  if (clip) {
+    const a = toScreen(clip.minX, clip.minY);
+    const b = toScreen(clip.maxX, clip.maxY);
+    ctx.beginPath();
+    ctx.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
+    ctx.clip();
+  }
   for (const t of placements) {
     const nw = toScreen(t.nw.x, t.nw.y);
     const ne = toScreen(t.ne.x, t.ne.y);
